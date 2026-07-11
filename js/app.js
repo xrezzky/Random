@@ -130,6 +130,11 @@ async function enterQueue() {
   await update(ref(db, `sessions/${uid}`), { status: "queued" });
   await set(ref(db, `queue/${uid}`), { joinedAt: Date.now(), displayId: State.displayId });
 
+  trackListener(ref(db, "queue"), (snap) => {
+    const n = snap.exists() ? Object.keys(snap.val()).length : 0;
+    $("#queueWait").textContent = `${n} ${n === 1 ? "person" : "people"} in queue right now`;
+  });
+
   // Fires the moment SOME client's matching check pairs us with someone
   // (could be triggered by our own check below, or anyone else's).
   const assignRef = ref(db, `matchAssignments/${uid}`);
@@ -152,6 +157,8 @@ async function enterQueue() {
 // pairing two OTHER users, not itself — that's expected and correct FIFO
 // behavior. Atomic via a transaction scoped to /queue.
 async function checkQueueForMatch() {
+  await pruneStaleQueueEntries();
+
   let pair = null;
 
   await runTransaction(ref(db, "queue"), (current) => {
@@ -169,6 +176,26 @@ async function checkQueueForMatch() {
 
   if (!pair) return;
   await createRoomForPair(pair[0], pair[1]);
+}
+
+// Ghost-entry cleanup: a queue entry whose owner is no longer in /presence
+// (tab closed without onDisconnect finishing, old test session, etc.) would
+// otherwise sit at the front of the FIFO line forever and block real users
+// from ever being paired. Safe to run redundantly — removing an
+// already-removed key is a no-op.
+async function pruneStaleQueueEntries() {
+  const [queueSnap, presenceSnap] = await Promise.all([
+    get(ref(db, "queue")),
+    get(ref(db, "presence")),
+  ]);
+  const queueVal = queueSnap.val();
+  if (!queueVal) return;
+  const presenceVal = presenceSnap.val() || {};
+  const updates = {};
+  for (const uid of Object.keys(queueVal)) {
+    if (!presenceVal[uid]) updates[`queue/${uid}`] = null;
+  }
+  if (Object.keys(updates).length) await update(ref(db), updates);
 }
 
 async function createRoomForPair(idA, idB) {
