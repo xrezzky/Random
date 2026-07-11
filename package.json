@@ -1,9 +1,13 @@
 {
   "name": "xrezzky-anonymous-chat",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "XRZ — anonymous random chat platform (frontend + Vercel serverless moderation API + Supabase backend).",
+  "type": "module",
+  "description": "XRZ — anonymous random chat platform. Firebase Realtime Database backend, Vercel serverless AI moderation (Groq/OpenRouter, key rotation), Vercel hosting.",
   "scripts": {
     "dev": "npx serve public"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.1.0"
   }
 }
