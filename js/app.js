@@ -4,7 +4,7 @@
 import { db, auth, authReady } from "./firebase-client.js";
 import {
   ref, push, set, update, remove, get, onValue, onChildAdded, off,
-  runTransaction, onDisconnect, serverTimestamp,
+  runTransaction, onDisconnect, serverTimestamp, query, orderByChild, equalTo,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
 const State = {
@@ -109,66 +109,81 @@ $("#btnConsentContinue")?.addEventListener("click", async () => {
   }
 });
 
-// ---------------- queue / matching (atomic via RTDB transaction) ----------------
+// ---------------- queue / matching ----------------
+// Model: rooms ARE the queue. Clicking Start either creates a fresh
+// "waiting" room (if none exist) or claims someone else's waiting room
+// directly. No separate /queue bookkeeping node — easy to eyeball in the
+// Firebase console: every /rooms/{id} is either "waiting" (1 person) or
+// "active" (2 people, chatting).
 async function enterQueue() {
   const uid = await ensureSession();
   $("#queueSession").textContent = `session_${uid.slice(0, 7).toUpperCase()}`;
   $("#queueWait").textContent = "Estimated wait: a few seconds";
-
   await update(ref(db, `sessions/${uid}`), { status: "queued" });
-
-  // Listen for a match assignment (fires whether WE find a partner below,
-  // or someone else's tryMatch matches with us first).
-  const assignRef = ref(db, `matchAssignments/${uid}`);
-  trackListener(assignRef, async (snap) => {
-    const val = snap.val();
-    if (val?.roomId) {
-      await remove(assignRef);
-      const roomSnap = await get(ref(db, `rooms/${val.roomId}`));
-      if (roomSnap.exists()) enterRoom(val.roomId, roomSnap.val());
-    }
-  });
-
-  await tryMatch(uid);
+  await findOrCreateRoom(uid);
 }
 
-// Atomic matching: a Firebase transaction on /queue guarantees only one
-// client can "claim" a given waiting partner at a time, so there's no
-// race condition even if two people click Start at the same instant.
-async function tryMatch(uid) {
-  let claimedPartner = null;
-
-  await runTransaction(ref(db, "queue"), (current) => {
-    if (!current) current = {};
-    const others = Object.keys(current).filter((id) => id !== uid);
-    if (others.length > 0) {
-      others.sort((a, b) => (current[a].joinedAt || 0) - (current[b].joinedAt || 0));
-      claimedPartner = others[0];
-      delete current[claimedPartner];
-      delete current[uid];
-      return current;
-    }
-    current[uid] = { joinedAt: Date.now(), displayId: State.displayId };
-    return current;
+async function findOrCreateRoom(uid) {
+  // 1. Look for someone else's waiting room and try to claim it.
+  const waitingQuery = query(ref(db, "rooms"), orderByChild("status"), equalTo("waiting"));
+  const snap = await get(waitingQuery);
+  const candidates = [];
+  snap.forEach((child) => {
+    const val = child.val();
+    if (val.userA !== uid) candidates.push({ id: child.key, createdAt: val.createdAt || 0 });
   });
+  candidates.sort((a, b) => a.createdAt - b.createdAt);
 
-  if (!claimedPartner) return; // now waiting in queue; assignment listener fires when matched
+  for (const candidate of candidates) {
+    const claimedRoom = await claimRoom(candidate.id, uid);
+    if (claimedRoom) {
+      await update(ref(db, `sessions/${uid}`), { status: "matched" });
+      await update(ref(db, `sessions/${claimedRoom.userA}`), { status: "matched" });
+      await enterRoom(candidate.id, claimedRoom);
+      return;
+    }
+    // someone else claimed it first (or it's stale) — try the next candidate
+  }
 
+  // 2. Nothing available right now: create our own waiting room and listen
+  // for someone to join it.
   const roomRef = push(ref(db, "rooms"));
   const roomId = roomRef.key;
   const roomData = {
     token: `room_${roomId.slice(0, 7).toUpperCase()}`,
     userA: uid,
-    userB: claimedPartner,
-    status: "active",
-    createdAt: serverTimestamp(),
+    userB: null,
+    status: "waiting",
+    createdAt: Date.now(),
   };
   await set(roomRef, roomData);
-  await set(ref(db, `matchAssignments/${claimedPartner}`), { roomId });
-  await update(ref(db, `sessions/${uid}`), { status: "matched" });
-  await update(ref(db, `sessions/${claimedPartner}`), { status: "matched" });
+  State.myWaitingRoomId = roomId;
 
-  await enterRoom(roomId, roomData);
+  trackListener(ref(db, `rooms/${roomId}`), (roomSnap) => {
+    const val = roomSnap.val();
+    if (val && val.status === "active" && val.userB) {
+      State.myWaitingRoomId = null;
+      enterRoom(roomId, val);
+    }
+  });
+}
+
+// Atomic claim: a Firebase transaction scoped to this ONE room node means
+// two people can't both claim the same waiting room, even if they search
+// at the exact same instant.
+async function claimRoom(roomId, uid) {
+  const result = await runTransaction(ref(db, `rooms/${roomId}`), (current) => {
+    if (!current || current.status !== "waiting" || current.userA === uid) {
+      return; // undefined = abort transaction, no change made
+    }
+    current.userB = uid;
+    current.status = "active";
+    return current;
+  });
+  if (result.committed && result.snapshot.val()?.status === "active" && result.snapshot.val()?.userB === uid) {
+    return result.snapshot.val();
+  }
+  return null;
 }
 
 $("#btnCancelQueue")?.addEventListener("click", async () => {
@@ -178,9 +193,11 @@ $("#btnCancelQueue")?.addEventListener("click", async () => {
 
 async function leaveQueue() {
   clearListeners();
+  if (State.myWaitingRoomId) {
+    await remove(ref(db, `rooms/${State.myWaitingRoomId}`));
+    State.myWaitingRoomId = null;
+  }
   if (State.uid) {
-    await remove(ref(db, `queue/${State.uid}`));
-    await remove(ref(db, `matchAssignments/${State.uid}`));
     await update(ref(db, `sessions/${State.uid}`), { status: "idle" });
   }
 }
