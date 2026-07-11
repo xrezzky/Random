@@ -11,16 +11,7 @@
 //   FIREBASE_SERVICE_ACCOUNT      (paste the full service-account JSON, as one line)
 //   ADMIN_PASSWORD                (any password you choose for the dashboard)
 // ============================================================
-import admin from "firebase-admin";
-
-function getAdminApp() {
-  if (admin.apps.length) return admin.app();
-  const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT || "{}");
-  return admin.initializeApp({
-    credential: admin.credential.cert(serviceAccount),
-    databaseURL: process.env.FIREBASE_DATABASE_URL,
-  });
-}
+import { getAdminApp } from "./_firebaseAdmin.js";
 
 export default async function handler(req, res) {
   const password = req.headers["x-admin-password"];
@@ -33,7 +24,7 @@ export default async function handler(req, res) {
     const app = getAdminApp();
     const db = app.database();
 
-    const [sessionsSnap, queueSnap, roomsSnap, messagesSnap, reportsSnap, violationsSnap, bansSnap] =
+    const [sessionsSnap, queueSnap, roomsSnap, messagesSnap, reportsSnap, violationsSnap, bansSnap, aiLogsSnap] =
       await Promise.all([
         db.ref("sessions").once("value"),
         db.ref("queue").once("value"),
@@ -42,6 +33,7 @@ export default async function handler(req, res) {
         db.ref("reports").limitToLast(30).once("value"),
         db.ref("violations").limitToLast(30).once("value"),
         db.ref("bans").limitToLast(30).once("value"),
+        db.ref("moderationLogs").limitToLast(30).once("value"),
       ]);
 
     const sessions = sessionsSnap.val() || {};
@@ -62,6 +54,7 @@ export default async function handler(req, res) {
       reports: toList(reportsSnap.val()),
       violations: toList(violationsSnap.val()),
       bans: toList(bansSnap.val()),
+      aiLogs: toList(aiLogsSnap.val()),
     });
   } catch (err) {
     console.error("admin-data error", err);
