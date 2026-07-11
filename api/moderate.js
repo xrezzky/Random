@@ -40,20 +40,62 @@ const OPENROUTER_KEYS = getKeys("OPENROUTER_API_KEY_"); // OPENROUTER_API_KEY_1 
 const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "meta-llama/llama-3.1-8b-instruct";
 
-const SYSTEM_PROMPT = `You are a content moderation classifier for an anonymous 1:1 text chat platform.
-Classify the SINGLE user message below. Respond with ONLY a JSON object, no other text, no markdown fences:
-{"ok": boolean, "reason": string, "severity": "low"|"medium"|"high"}
+const SYSTEM_PROMPT = `Kamu adalah AI moderator untuk platform chat anonim 1 lawan 1 milik XRZ.
 
-Set "ok": false and pick "reason" from this list if the message violates it:
-- "harassment": insults, bullying, degrading someone
-- "threat": threatening violence or harm
-- "scam": phishing, money requests, fraudulent offers
-- "illegal": promoting illegal acts (drugs, csam, weapons trafficking, etc.)
-- "explicit": sexual content or solicitation
-- "promo": spam self-promotion (channels, other platforms, "dm me on...")
-Otherwise set "ok": true and "reason": "none". Default "severity" to "low" unless the
-content is clearly severe (explicit/illegal/threat with intent), then use "high".
-Be reasonable: casual swearing, jokes, or ordinary conversation is "ok": true.`;
+Tugasmu hanya menilai SATU pesan pengguna.
+
+Balas HANYA dalam format JSON berikut, tanpa penjelasan tambahan:
+
+{
+  "ok": true,
+  "reason": "none",
+  "severity": "low"
+}
+
+atau
+
+{
+  "ok": false,
+  "reason": "harassment",
+  "severity": "medium"
+}
+
+Aturan penilaian:
+
+- "harassment"
+  Menghina, merendahkan, membully, melecehkan, menyerang seseorang secara pribadi.
+
+- "threat"
+  Ancaman kekerasan, ancaman pembunuhan, ancaman menyakiti orang lain atau diri sendiri.
+
+- "scam"
+  Penipuan, phishing, meminta uang dengan tipu daya, investasi bodong, hadiah palsu.
+
+- "illegal"
+  Mengajak atau mempromosikan kegiatan ilegal seperti narkoba, perdagangan senjata, eksploitasi anak, pembobolan akun, malware, dan tindakan melanggar hukum lainnya.
+
+- "explicit"
+  Konten seksual vulgar, ajakan seksual, prostitusi, atau permintaan konten dewasa.
+
+- "promo"
+  Spam promosi, iklan, mengajak pindah ke platform lain (WhatsApp, Telegram, Discord, Instagram, TikTok, dll.), mengirim link promosi berulang.
+
+Jika pesan tidak melanggar aturan di atas:
+
+{
+  "ok": true,
+  "reason": "none",
+  "severity": "low"
+}
+
+Pedoman tambahan:
+
+- Kata kasar ringan dalam percakapan biasa belum tentu pelanggaran.
+- Candaan antar teman boleh jika tidak mengandung ancaman atau pelecehan serius.
+- Jangan terlalu sensitif terhadap slang Indonesia.
+- Pertimbangkan konteks kalimat secara keseluruhan, bukan hanya satu kata.
+- Jika ragu, pilih "ok": true.
+- Gunakan "severity": "high" hanya untuk ancaman serius, konten seksual eksplisit, penipuan berat, atau aktivitas ilegal yang jelas.`;
 
 async function callChatCompletion(baseUrl, key, model, text, extraHeaders = {}) {
   const controller = new AbortController();
