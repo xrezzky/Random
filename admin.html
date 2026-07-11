@@ -32,9 +32,10 @@
 <main id="app">
   <div id="gate" class="gate">
     <h2>Admin access</h2>
-    <p class="muted">Paste your Supabase <strong>service_role</strong> key. This stays in your browser only and is never sent anywhere except your own Supabase project.</p>
-    <input type="password" id="serviceKeyInput" placeholder="service_role key" />
+    <p class="muted">Enter the admin password (set as <code>ADMIN_PASSWORD</code> in Vercel). It's sent as a header to <code>/api/admin-data</code> — the Firebase service account itself never touches the browser.</p>
+    <input type="password" id="pwInput" placeholder="Admin password" />
     <button class="btn btn-primary" id="btnUnlock">Unlock Dashboard</button>
+    <p class="muted" id="gateError" style="color: var(--danger); display:none;"></p>
   </div>
 
   <div id="dashboard" hidden>
@@ -51,58 +52,64 @@
   </div>
 </main>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <script>
-  // NOTE: This is a minimal, client-side-only admin view for getting started
-  // quickly. Because it uses the service_role key directly in the browser,
-  // it should live behind your own auth (e.g. a login wall / IP allowlist)
-  // before going to production — do not ship this page publicly as-is.
-  const SUPABASE_URL = "https://YOUR-PROJECT-REF.supabase.co";
-  let adminClient;
+  let adminPassword = "";
 
   document.getElementById("btnUnlock").addEventListener("click", async () => {
-    const key = document.getElementById("serviceKeyInput").value.trim();
-    if (!key) return;
-    adminClient = window.supabase.createClient(SUPABASE_URL, key);
-    document.getElementById("gate").hidden = true;
-    document.getElementById("dashboard").hidden = false;
-    await loadAll();
-    setInterval(loadAll, 15000);
+    adminPassword = document.getElementById("pwInput").value.trim();
+    if (!adminPassword) return;
+    const ok = await loadAll();
+    if (ok) {
+      document.getElementById("gate").hidden = true;
+      document.getElementById("dashboard").hidden = false;
+      setInterval(loadAll, 15000);
+    }
   });
 
+  function esc(s) { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
+
   async function loadAll() {
-    const [{ count: online }, { count: queued }, { count: rooms }, { count: msgsToday }, { data: reports }, { data: violations }, { data: bans }] = await Promise.all([
-      adminClient.from("sessions").select("id", { count: "exact", head: true }).in("status", ["idle", "queued", "matched"]),
-      adminClient.from("waiting_queue").select("id", { count: "exact", head: true }),
-      adminClient.from("rooms").select("id", { count: "exact", head: true }).eq("status", "active"),
-      adminClient.from("messages").select("id", { count: "exact", head: true }).gte("created_at", new Date().toISOString().slice(0,10)),
-      adminClient.from("reports").select("*").order("created_at", { ascending: false }).limit(20),
-      adminClient.from("violations").select("*").order("created_at", { ascending: false }).limit(20),
-      adminClient.from("bans").select("*").order("created_at", { ascending: false }).limit(20),
-    ]);
+    const errEl = document.getElementById("gateError");
+    errEl.style.display = "none";
+    try {
+      const res = await fetch("/api/admin-data", { headers: { "x-admin-password": adminPassword } });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        errEl.textContent = body.error || `Request failed (${res.status})`;
+        errEl.style.display = "block";
+        return false;
+      }
+      const data = await res.json();
 
-    document.getElementById("statGrid").innerHTML = [
-      ["Online Users", online ?? 0],
-      ["Waiting Users", queued ?? 0],
-      ["Active Rooms", rooms ?? 0],
-      ["Today's Messages", msgsToday ?? 0],
-      ["Open Reports", (reports || []).filter(r => r.status === "open").length],
-      ["Violations (recent)", (violations || []).length],
-    ].map(([label, val]) => `<div class="admin-stat"><strong>${val}</strong><span>${label}</span></div>`).join("");
+      document.getElementById("statGrid").innerHTML = [
+        ["Online Users", data.onlineUsers],
+        ["Waiting Users", data.waitingUsers],
+        ["Active Rooms", data.activeRooms],
+        ["Today's Messages", data.messagesToday],
+        ["Open Reports", (data.reports || []).filter(r => r.status === "open").length],
+        ["Violations (recent)", (data.violations || []).length],
+      ].map(([label, val]) => `<div class="admin-stat"><strong>${val ?? 0}</strong><span>${label}</span></div>`).join("");
 
-    document.querySelector("#reportsTable tbody").innerHTML = (reports || []).map(r => `
-      <tr><td>${r.reason}</td><td>${r.details || "—"}</td>
-      <td><span class="badge badge-${r.status === "open" ? "open" : "reviewed"}">${r.status}</span></td>
-      <td>${new Date(r.created_at).toLocaleString()}</td></tr>`).join("");
+      document.querySelector("#reportsTable tbody").innerHTML = (data.reports || []).map(r => `
+        <tr><td>${esc(r.reason)}</td><td>${esc(r.details) || "—"}</td>
+        <td><span class="badge badge-${r.status === "open" ? "open" : "reviewed"}">${esc(r.status)}</span></td>
+        <td>${r.createdAt ? new Date(r.createdAt).toLocaleString() : "—"}</td></tr>`).join("");
 
-    document.querySelector("#violationsTable tbody").innerHTML = (violations || []).map(v => `
-      <tr><td>${v.violation_type}</td><td>${v.severity}</td><td>${(v.evidence || "").slice(0,60)}</td>
-      <td>${new Date(v.created_at).toLocaleString()}</td></tr>`).join("");
+      document.querySelector("#violationsTable tbody").innerHTML = (data.violations || []).map(v => `
+        <tr><td>${esc(v.violationType)}</td><td>${esc(v.severity)}</td><td>${esc((v.evidence || "").slice(0,60))}</td>
+        <td>${v.createdAt ? new Date(v.createdAt).toLocaleString() : "—"}</td></tr>`).join("");
 
-    document.querySelector("#bansTable tbody").innerHTML = (bans || []).map(b => `
-      <tr><td>${(b.session_id || "").slice(0,8)}</td><td>${b.reason || "—"}</td>
-      <td>${b.banned_until ? new Date(b.banned_until).toLocaleString() : "Permanent"}</td>
-      <td>${new Date(b.created_at).toLocaleString()}</td></tr>`).join("");
+      document.querySelector("#bansTable tbody").innerHTML = (data.bans || []).map(b => `
+        <tr><td>${esc((b.sessionId || "").slice(0,8))}</td><td>${esc(b.reason) || "—"}</td>
+        <td>${b.bannedUntil ? new Date(b.bannedUntil).toLocaleString() : "Permanent"}</td>
+        <td>${b.createdAt ? new Date(b.createdAt).toLocaleString() : "—"}</td></tr>`).join("");
+
+      return true;
+    } catch (err) {
+      errEl.textContent = "Network error reaching /api/admin-data";
+      errEl.style.display = "block";
+      return false;
+    }
   }
 </script>
 </body>
