@@ -191,9 +191,11 @@ async function checkQueueForMatch() {
 // Ghost-entry cleanup: a queue entry whose owner is no longer in /presence
 // (tab closed without onDisconnect finishing, old test session, etc.) would
 // otherwise sit at the front of the FIFO line forever and block real users
-// from ever being paired. Safe to run redundantly — removing an
-// already-removed key is a no-op.
+// from ever being paired. A grace period avoids pruning an entry that was
+// only just created (presence write/read may not have fully propagated
+// yet). Safe to run redundantly — removing an already-removed key is a no-op.
 async function pruneStaleQueueEntries() {
+  const GRACE_MS = 8000;
   const [queueSnap, presenceSnap] = await Promise.all([
     get(ref(db, "queue")),
     get(ref(db, "presence")),
@@ -201,9 +203,11 @@ async function pruneStaleQueueEntries() {
   const queueVal = queueSnap.val();
   if (!queueVal) return;
   const presenceVal = presenceSnap.val() || {};
+  const now = Date.now();
   const updates = {};
-  for (const uid of Object.keys(queueVal)) {
-    if (!presenceVal[uid]) updates[`queue/${uid}`] = null;
+  for (const [uid, entry] of Object.entries(queueVal)) {
+    const age = now - (entry?.joinedAt || 0);
+    if (age > GRACE_MS && !presenceVal[uid]) updates[`queue/${uid}`] = null;
   }
   if (Object.keys(updates).length) await update(ref(db), updates);
 }
