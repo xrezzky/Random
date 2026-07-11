@@ -182,8 +182,12 @@ async function createRoomForPair(idA, idB) {
     createdAt: serverTimestamp(),
   };
   await set(roomRef, roomData);
-  await update(ref(db, `sessions/${idA}`), { status: "matched" });
-  await update(ref(db, `sessions/${idB}`), { status: "matched" });
+  // NOTE: we deliberately do NOT touch sessions/{idA} or sessions/{idB} here —
+  // whichever client happens to run this pairing check might be neither A nor
+  // B (it paired two OTHER waiting users), and the security rules only allow
+  // a user to write their own sessions/$uid node. Each client marks its own
+  // session "matched" itself, in enterRoom() below, once it receives the
+  // assignment.
   await set(ref(db, `matchAssignments/${idA}`), { roomId });
   await set(ref(db, `matchAssignments/${idB}`), { roomId });
 }
@@ -218,6 +222,7 @@ async function enterRoom(roomId, room) {
   $("#chatStatusLine").textContent = "Partner connected";
   $("#chatBody").innerHTML = `<div class="system-msg">You're now chatting with a stranger. Say hi 👋</div>`;
   Moderation.resetFloodWindow();
+  await update(ref(db, `sessions/${State.uid}`), { status: "matched" });
 
   showScreen("screen-chat");
 
