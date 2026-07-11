@@ -104,7 +104,7 @@ $("#btnConsentContinue")?.addEventListener("click", async () => {
     await enterQueue();
   } catch (err) {
     console.error(err);
-    toast("Could not start a session. Check your Firebase config.", "danger");
+    toast(`Session error: ${err?.message || err}`, "danger");
     showScreen("screen-landing");
   }
 });
