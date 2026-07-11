@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>XRZ Admin</title>
+<link rel="stylesheet" href="css/style.css" />
+<style>
+  #app { max-width: 1200px; }
+  .admin-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 14px; margin-bottom: 30px; }
+  .admin-stat { background: var(--card); border: var(--border-w) solid var(--border); border-radius: var(--radius-sm); padding: 18px; }
+  .admin-stat strong { font-size: 26px; display: block; }
+  .admin-stat span { color: var(--text-2); font-size: 13px; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 34px; font-size: 13.5px; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1.5px solid var(--border); }
+  th { color: var(--text-2); font-weight: 700; text-transform: uppercase; font-size: 11px; letter-spacing: .04em; }
+  .section-title { font-size: 18px; font-weight: 800; margin: 0 0 12px; }
+  .badge { padding: 3px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; }
+  .badge-open { background: rgba(239,68,68,.15); color: var(--danger); }
+  .badge-reviewed { background: rgba(34,197,94,.15); color: var(--success); }
+  .gate { max-width: 420px; margin: 120px auto; text-align: center; }
+  .gate input { width: 100%; padding: 12px; margin: 14px 0; background: #0F1729; border: var(--border-w) solid var(--border); border-radius: 10px; color: white; }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="logo"><span>XRZ Admin</span></div>
+  </div>
+</header>
+
+<main id="app">
+  <div id="gate" class="gate">
+    <h2>Admin access</h2>
+    <p class="muted">Paste your Supabase <strong>service_role</strong> key. This stays in your browser only and is never sent anywhere except your own Supabase project.</p>
+    <input type="password" id="serviceKeyInput" placeholder="service_role key" />
+    <button class="btn btn-primary" id="btnUnlock">Unlock Dashboard</button>
+  </div>
+
+  <div id="dashboard" hidden>
+    <div class="admin-grid" id="statGrid"></div>
+
+    <h3 class="section-title">Open Reports</h3>
+    <table id="reportsTable"><thead><tr><th>Reason</th><th>Details</th><th>Status</th><th>Created</th></tr></thead><tbody></tbody></table>
+
+    <h3 class="section-title">Recent Violations</h3>
+    <table id="violationsTable"><thead><tr><th>Type</th><th>Severity</th><th>Evidence</th><th>Created</th></tr></thead><tbody></tbody></table>
+
+    <h3 class="section-title">Ban List</h3>
+    <table id="bansTable"><thead><tr><th>Session</th><th>Reason</th><th>Until</th><th>Created</th></tr></thead><tbody></tbody></table>
+  </div>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script>
+  // NOTE: This is a minimal, client-side-only admin view for getting started
+  // quickly. Because it uses the service_role key directly in the browser,
+  // it should live behind your own auth (e.g. a login wall / IP allowlist)
+  // before going to production — do not ship this page publicly as-is.
+  const SUPABASE_URL = "https://YOUR-PROJECT-REF.supabase.co";
+  let adminClient;
+
+  document.getElementById("btnUnlock").addEventListener("click", async () => {
+    const key = document.getElementById("serviceKeyInput").value.trim();
+    if (!key) return;
+    adminClient = window.supabase.createClient(SUPABASE_URL, key);
+    document.getElementById("gate").hidden = true;
+    document.getElementById("dashboard").hidden = false;
+    await loadAll();
+    setInterval(loadAll, 15000);
+  });
+
+  async function loadAll() {
+    const [{ count: online }, { count: queued }, { count: rooms }, { count: msgsToday }, { data: reports }, { data: violations }, { data: bans }] = await Promise.all([
+      adminClient.from("sessions").select("id", { count: "exact", head: true }).in("status", ["idle", "queued", "matched"]),
+      adminClient.from("waiting_queue").select("id", { count: "exact", head: true }),
+      adminClient.from("rooms").select("id", { count: "exact", head: true }).eq("status", "active"),
+      adminClient.from("messages").select("id", { count: "exact", head: true }).gte("created_at", new Date().toISOString().slice(0,10)),
+      adminClient.from("reports").select("*").order("created_at", { ascending: false }).limit(20),
+      adminClient.from("violations").select("*").order("created_at", { ascending: false }).limit(20),
+      adminClient.from("bans").select("*").order("created_at", { ascending: false }).limit(20),
+    ]);
+
+    document.getElementById("statGrid").innerHTML = [
+      ["Online Users", online ?? 0],
+      ["Waiting Users", queued ?? 0],
+      ["Active Rooms", rooms ?? 0],
+      ["Today's Messages", msgsToday ?? 0],
+      ["Open Reports", (reports || []).filter(r => r.status === "open").length],
+      ["Violations (recent)", (violations || []).length],
+    ].map(([label, val]) => `<div class="admin-stat"><strong>${val}</strong><span>${label}</span></div>`).join("");
+
+    document.querySelector("#reportsTable tbody").innerHTML = (reports || []).map(r => `
+      <tr><td>${r.reason}</td><td>${r.details || "—"}</td>
+      <td><span class="badge badge-${r.status === "open" ? "open" : "reviewed"}">${r.status}</span></td>
+      <td>${new Date(r.created_at).toLocaleString()}</td></tr>`).join("");
+
+    document.querySelector("#violationsTable tbody").innerHTML = (violations || []).map(v => `
+      <tr><td>${v.violation_type}</td><td>${v.severity}</td><td>${(v.evidence || "").slice(0,60)}</td>
+      <td>${new Date(v.created_at).toLocaleString()}</td></tr>`).join("");
+
+    document.querySelector("#bansTable tbody").innerHTML = (bans || []).map(b => `
+      <tr><td>${(b.session_id || "").slice(0,8)}</td><td>${b.reason || "—"}</td>
+      <td>${b.banned_until ? new Date(b.banned_until).toLocaleString() : "Permanent"}</td>
+      <td>${new Date(b.created_at).toLocaleString()}</td></tr>`).join("");
+  }
+</script>
+</body>
+</html>
