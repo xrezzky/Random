@@ -1,15 +1,19 @@
 // ============================================================
-// XRZ Anonymous Chat — app logic
+// XRZ Anonymous Chat — app logic (Firebase Realtime Database)
 // ============================================================
+import { db, auth, authReady } from "./firebase-client.js";
+import {
+  ref, push, set, update, remove, get, onValue, onChildAdded, off,
+  runTransaction, onDisconnect, serverTimestamp,
+} from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
 const State = {
-  session: null,        // { id, display_id }
-  room: null,            // { id, room_token, partnerId }
-  queueRow: null,
-  matchChannel: null,
-  roomChannel: null,
-  typingTimeout: null,
+  uid: null,
+  displayId: null,
+  room: null,           // { id, token, partnerId }
   reportReason: null,
+  listeners: [],         // [{ ref, cb, event }] for cleanup via off()
+  typingSendAt: 0,
 };
 
 // ---------------- helpers ----------------
@@ -42,23 +46,39 @@ function setStatusOnline(on) {
   $("#statusText").textContent = on ? "Online" : "Offline";
 }
 
+function trackListener(r, cb, event = "value") {
+  if (event === "value") onValue(r, cb);
+  else onChildAdded(r, cb);
+  State.listeners.push({ ref: r, cb, event });
+}
+function clearListeners() {
+  State.listeners.forEach(({ ref: r, cb, event }) => off(r, event, cb));
+  State.listeners = [];
+}
+
 // ---------------- session bootstrap ----------------
 async function ensureSession() {
-  if (State.session) return State.session;
-  const display_id = randomId("Guest");
-  const { data, error } = await sb
-    .from("sessions")
-    .insert({ display_id, status: "idle" })
-    .select()
-    .single();
-  if (error) {
-    console.error(error);
-    toast("Could not start a session. Check your Supabase config.", "danger");
-    throw error;
-  }
-  State.session = data;
+  if (State.uid) return State.uid;
+  await authReady;
+  const uid = auth.currentUser.uid;
+  State.uid = uid;
+  State.displayId = randomId("Guest");
+
+  await set(ref(db, `sessions/${uid}`), {
+    displayId: State.displayId,
+    status: "idle",
+    createdAt: serverTimestamp(),
+    lastSeenAt: serverTimestamp(),
+  });
+
+  // presence: mark online now, auto-remove on disconnect (tab close, network drop)
+  const presenceRef = ref(db, `presence/${uid}`);
+  await set(presenceRef, { displayId: State.displayId, at: serverTimestamp() });
+  onDisconnect(presenceRef).remove();
+  onDisconnect(ref(db, `sessions/${uid}/status`)).set("idle");
+
   setStatusOnline(true);
-  return data;
+  return uid;
 }
 
 // ---------------- landing ----------------
@@ -82,84 +102,73 @@ $("#btnConsentContinue")?.addEventListener("click", async () => {
   try {
     await ensureSession();
     await enterQueue();
-  } catch {
+  } catch (err) {
+    console.error(err);
+    toast("Could not start a session. Check your Firebase config.", "danger");
     showScreen("screen-landing");
   }
 });
 
-// ---------------- queue / matching ----------------
+// ---------------- queue / matching (atomic via RTDB transaction) ----------------
 async function enterQueue() {
-  const session = await ensureSession();
-  $("#queueSession").textContent = `session_${session.id.slice(0, 7).toUpperCase()}`;
+  const uid = await ensureSession();
+  $("#queueSession").textContent = `session_${uid.slice(0, 7).toUpperCase()}`;
   $("#queueWait").textContent = "Estimated wait: a few seconds";
 
-  await sb.from("sessions").update({ status: "queued" }).eq("id", session.id);
+  await update(ref(db, `sessions/${uid}`), { status: "queued" });
 
-  const { data: qRow, error } = await sb
-    .from("waiting_queue")
-    .insert({ session_id: session.id })
-    .select()
-    .single();
-  if (error) { toast("Could not join the queue.", "danger"); showScreen("screen-landing"); return; }
-  State.queueRow = qRow;
+  // Listen for a match assignment (fires whether WE find a partner below,
+  // or someone else's tryMatch matches with us first).
+  const assignRef = ref(db, `matchAssignments/${uid}`);
+  trackListener(assignRef, async (snap) => {
+    const val = snap.val();
+    if (val?.roomId) {
+      await remove(assignRef);
+      const roomSnap = await get(ref(db, `rooms/${val.roomId}`));
+      if (roomSnap.exists()) enterRoom(val.roomId, roomSnap.val());
+    }
+  });
 
-  // Try to find an existing waiting partner right away.
-  const matched = await tryMatch();
-  if (matched) return;
-
-  // Otherwise, listen for someone creating a room with us as user_a/user_b.
-  State.matchChannel = sb
-    .channel(`match-${session.id}`)
-    .on(
-      "postgres_changes",
-      { event: "INSERT", schema: "public", table: "rooms", filter: `user_b=eq.${session.id}` },
-      (payload) => enterRoom(payload.new)
-    )
-    .on(
-      "postgres_changes",
-      { event: "INSERT", schema: "public", table: "rooms", filter: `user_a=eq.${session.id}` },
-      (payload) => enterRoom(payload.new)
-    )
-    .subscribe();
-
-  // Fallback poll every 2.5s in case realtime insert events are delayed/missed,
-  // and to keep trying to match us against other waiters.
-  State._queuePoll = setInterval(tryMatch, 2500);
+  await tryMatch(uid);
 }
 
-async function tryMatch() {
-  if (!State.session || !State.queueRow) return false;
+// Atomic matching: a Firebase transaction on /queue guarantees only one
+// client can "claim" a given waiting partner at a time, so there's no
+// race condition even if two people click Start at the same instant.
+async function tryMatch(uid) {
+  let claimedPartner = null;
 
-  const { data: others } = await sb
-    .from("waiting_queue")
-    .select("session_id, joined_at")
-    .neq("session_id", State.session.id)
-    .order("joined_at", { ascending: true })
-    .limit(1);
+  await runTransaction(ref(db, "queue"), (current) => {
+    if (!current) current = {};
+    const others = Object.keys(current).filter((id) => id !== uid);
+    if (others.length > 0) {
+      others.sort((a, b) => (current[a].joinedAt || 0) - (current[b].joinedAt || 0));
+      claimedPartner = others[0];
+      delete current[claimedPartner];
+      delete current[uid];
+      return current;
+    }
+    current[uid] = { joinedAt: Date.now(), displayId: State.displayId };
+    return current;
+  });
 
-  if (!others || others.length === 0) return false;
+  if (!claimedPartner) return; // now waiting in queue; assignment listener fires when matched
 
-  const partnerSessionId = others[0].session_id;
-  const room_token = `room_${randomId("").slice(1)}`;
+  const roomRef = push(ref(db, "rooms"));
+  const roomId = roomRef.key;
+  const roomData = {
+    token: `room_${roomId.slice(0, 7).toUpperCase()}`,
+    userA: uid,
+    userB: claimedPartner,
+    status: "active",
+    createdAt: serverTimestamp(),
+  };
+  await set(roomRef, roomData);
+  await set(ref(db, `matchAssignments/${claimedPartner}`), { roomId });
+  await update(ref(db, `sessions/${uid}`), { status: "matched" });
+  await update(ref(db, `sessions/${claimedPartner}`), { status: "matched" });
 
-  // Best-effort room creation. NOTE: without a Postgres RPC/transaction this
-  // has a small race window if two clients match the same partner at once —
-  // acceptable for a first version, but move this into a `match_users()`
-  // Postgres function (SECURITY DEFINER) before a real public launch.
-  const { data: room, error } = await sb
-    .from("rooms")
-    .insert({ user_a: State.session.id, user_b: partnerSessionId, room_token })
-    .select()
-    .single();
-
-  if (error) return false; // partner likely already matched by someone else
-
-  await sb.from("waiting_queue").delete().eq("session_id", State.session.id);
-  await sb.from("waiting_queue").delete().eq("session_id", partnerSessionId);
-  await sb.from("sessions").update({ status: "matched" }).in("id", [State.session.id, partnerSessionId]);
-
-  await enterRoom(room);
-  return true;
+  await enterRoom(roomId, roomData);
 }
 
 $("#btnCancelQueue")?.addEventListener("click", async () => {
@@ -168,53 +177,46 @@ $("#btnCancelQueue")?.addEventListener("click", async () => {
 });
 
 async function leaveQueue() {
-  clearInterval(State._queuePoll);
-  if (State.matchChannel) sb.removeChannel(State.matchChannel);
-  State.matchChannel = null;
-  if (State.session) {
-    await sb.from("waiting_queue").delete().eq("session_id", State.session.id);
-    await sb.from("sessions").update({ status: "idle" }).eq("id", State.session.id);
+  clearListeners();
+  if (State.uid) {
+    await remove(ref(db, `queue/${State.uid}`));
+    await remove(ref(db, `matchAssignments/${State.uid}`));
+    await update(ref(db, `sessions/${State.uid}`), { status: "idle" });
   }
-  State.queueRow = null;
 }
 
 // ---------------- room / chat ----------------
-async function enterRoom(room) {
-  clearInterval(State._queuePoll);
-  if (State.matchChannel) { sb.removeChannel(State.matchChannel); State.matchChannel = null; }
+async function enterRoom(roomId, room) {
+  clearListeners();
+  const partnerId = room.userA === State.uid ? room.userB : room.userA;
+  const partnerSnap = await get(ref(db, `sessions/${partnerId}/displayId`));
 
-  const partnerSessionId = room.user_a === State.session.id ? room.user_b : room.user_a;
-  const { data: partner } = await sb.from("sessions").select("display_id").eq("id", partnerSessionId).single();
-
-  State.room = { id: room.id, room_token: room.room_token, partnerId: partnerSessionId };
-  $("#partnerId").textContent = partner?.display_id || "Anonymous";
+  State.room = { id: roomId, token: room.token, partnerId };
+  $("#partnerId").textContent = partnerSnap.val() || "Anonymous";
   $("#chatStatusLine").textContent = "Partner connected";
   $("#chatBody").innerHTML = `<div class="system-msg">You're now chatting with a stranger. Say hi 👋</div>`;
   Moderation.resetFloodWindow();
 
   showScreen("screen-chat");
 
-  State.roomChannel = sb
-    .channel(`room-${room.id}`)
-    .on(
-      "postgres_changes",
-      { event: "INSERT", schema: "public", table: "messages", filter: `room_id=eq.${room.id}` },
-      (payload) => renderIncomingMessage(payload.new)
-    )
-    .on(
-      "postgres_changes",
-      { event: "UPDATE", schema: "public", table: "rooms", filter: `id=eq.${room.id}` },
-      (payload) => { if (payload.new.status === "closed") handlePartnerLeft(); }
-    )
-    .on("broadcast", { event: "typing" }, (msg) => {
-      if (msg.payload.sender !== State.session.id) showTyping();
-    })
-    .subscribe();
+  // messages: only react to NEW children so we never re-render history
+  trackListener(ref(db, `messages/${roomId}`), (snap) => renderIncomingMessage(snap.val()), "child_added");
+
+  // room status (partner disconnects)
+  trackListener(ref(db, `rooms/${roomId}/status`), (snap) => {
+    if (snap.val() === "closed" && State.room?.id === roomId) handlePartnerLeft();
+  });
+
+  // typing indicator from partner
+  trackListener(ref(db, `typing/${roomId}/${partnerId}`), (snap) => {
+    const ts = snap.val();
+    if (ts && Date.now() - ts < 2500) showTyping();
+  });
 }
 
-function renderIncomingMessage(row) {
-  if (row.sender_id === State.session.id) return; // we render our own optimistically
-  appendBubble(row.content, "them", row.created_at);
+function renderIncomingMessage(msg) {
+  if (!msg || msg.senderId === State.uid) return; // we render our own optimistically
+  appendBubble(msg.content, "them", msg.createdAt);
 }
 
 function appendBubble(text, who, ts) {
@@ -268,19 +270,20 @@ $("#chatForm")?.addEventListener("submit", async (e) => {
   const remote = await Moderation.remoteCheck(text);
   if (!remote.ok) {
     toast(moderationMessage(remote.reason || "flagged"), "danger");
-    await sb.from("violations").insert({
-      session_id: State.session.id,
-      violation_type: remote.reason || "flagged",
+    await push(ref(db, "violations"), {
+      sessionId: State.uid,
+      violationType: remote.reason || "flagged",
       severity: remote.severity || "low",
       evidence: text,
+      createdAt: serverTimestamp(),
     });
     return; // blocked message is NOT persisted to the room
   }
 
-  await sb.from("messages").insert({
-    room_id: State.room.id,
-    sender_id: State.session.id,
+  await push(ref(db, `messages/${State.room.id}`), {
+    senderId: State.uid,
     content: text,
+    createdAt: Date.now(),
   });
 });
 
@@ -295,23 +298,26 @@ function moderationMessage(reason) {
     harassment: "That message was blocked for violating our safety guidelines.",
     explicit: "Explicit content isn't allowed here.",
     threat: "Threatening content isn't allowed here.",
+    scam: "That message looked like a scam attempt and was blocked.",
+    illegal: "That content isn't allowed here.",
+    promo: "Self-promotion / links to other platforms aren't allowed.",
   };
   return map[reason] || "Your message was blocked by moderation.";
 }
 
-let lastTypingSent = 0;
 $("#chatInput")?.addEventListener("input", () => {
   const now = Date.now();
-  if (now - lastTypingSent < 1200 || !State.roomChannel) return;
-  lastTypingSent = now;
-  State.roomChannel.send({ type: "broadcast", event: "typing", payload: { sender: State.session.id } });
+  if (now - State.typingSendAt < 1200 || !State.room) return;
+  State.typingSendAt = now;
+  set(ref(db, `typing/${State.room.id}/${State.uid}`), Date.now());
 });
 
 // ---------------- next / disconnect ----------------
-async function leaveRoom(closeStatus = "closed") {
-  if (State.roomChannel) { sb.removeChannel(State.roomChannel); State.roomChannel = null; }
+async function leaveRoom() {
+  clearListeners();
   if (State.room) {
-    await sb.from("rooms").update({ status: closeStatus, closed_at: new Date().toISOString() }).eq("id", State.room.id);
+    await update(ref(db, `rooms/${State.room.id}`), { status: "closed", closedAt: serverTimestamp() });
+    await remove(ref(db, `typing/${State.room.id}/${State.uid}`));
   }
   State.room = null;
 }
@@ -324,12 +330,13 @@ $("#btnNext")?.addEventListener("click", async () => {
 
 $("#btnDisconnect")?.addEventListener("click", async () => {
   await leaveRoom();
-  await sb.from("sessions").update({ status: "idle" }).eq("id", State.session.id);
+  await update(ref(db, `sessions/${State.uid}`), { status: "idle" });
   showScreen("screen-landing");
 });
 
 // ---------------- report modal ----------------
 $("#btnReport")?.addEventListener("click", () => {
+  if (!State.room) return; // only reportable from an active chat
   State.reportReason = null;
   $all(".reason-chip").forEach((c) => c.classList.remove("selected"));
   $("#reportDetails").value = "";
@@ -350,30 +357,30 @@ $all(".reason-chip").forEach((chip) => {
 
 $("#btnSubmitReport")?.addEventListener("click", async () => {
   if (!State.reportReason || !State.room) return;
-  await sb.from("reports").insert({
-    room_id: State.room.id,
-    reporter_id: State.session.id,
-    reported_id: State.room.partnerId,
+  await push(ref(db, "reports"), {
+    roomId: State.room.id,
+    reporterId: State.uid,
+    reportedId: State.room.partnerId,
     reason: State.reportReason,
     details: $("#reportDetails").value.trim() || null,
+    status: "open",
+    createdAt: serverTimestamp(),
   });
   $("#reportModal").hidden = true;
   toast("Report submitted. Thank you for keeping XRZ safe.", "success");
 });
 
-// ---------------- online counter (best-effort presence) ----------------
-async function refreshOnlineCount() {
-  const { count } = await sb
-    .from("sessions")
-    .select("id", { count: "exact", head: true })
-    .in("status", ["idle", "queued", "matched"])
-    .gt("last_seen_at", new Date(Date.now() - 60_000).toISOString());
-  $("#onlineCount").textContent = count ?? "—";
+// ---------------- online counter (Firebase presence) ----------------
+async function initOnlineCounter() {
+  await ensureSession().catch(() => {});
+  onValue(ref(db, "presence"), (snap) => {
+    const val = snap.val() || {};
+    $("#onlineCount").textContent = Object.keys(val).length;
+  });
 }
-setInterval(refreshOnlineCount, 15000);
-refreshOnlineCount();
+initOnlineCounter();
 
-// keep last_seen_at fresh while tab is open
+// keep last_seen fresh
 setInterval(() => {
-  if (State.session) sb.from("sessions").update({ last_seen_at: new Date().toISOString() }).eq("id", State.session.id);
+  if (State.uid) update(ref(db, `sessions/${State.uid}`), { lastSeenAt: serverTimestamp() });
 }, 20000);
