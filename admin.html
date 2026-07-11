@@ -49,6 +49,9 @@
 
     <h3 class="section-title">Ban List</h3>
     <table id="bansTable"><thead><tr><th>Session</th><th>Reason</th><th>Until</th><th>Created</th></tr></thead><tbody></tbody></table>
+
+    <h3 class="section-title">AI Moderation Logs</h3>
+    <table id="aiLogsTable"><thead><tr><th>Provider</th><th>Verdict</th><th>Message</th><th>Created</th></tr></thead><tbody></tbody></table>
   </div>
 </main>
 
@@ -103,6 +106,10 @@
         <tr><td>${esc((b.sessionId || "").slice(0,8))}</td><td>${esc(b.reason) || "—"}</td>
         <td>${b.bannedUntil ? new Date(b.bannedUntil).toLocaleString() : "Permanent"}</td>
         <td>${b.createdAt ? new Date(b.createdAt).toLocaleString() : "—"}</td></tr>`).join("");
+
+      document.querySelector("#aiLogsTable tbody").innerHTML = (data.aiLogs || []).map(l => `
+        <tr><td>${esc(l.provider)}</td><td>${esc(l.verdict)}</td><td>${esc((l.text || "").slice(0,60))}</td>
+        <td>${l.createdAt ? new Date(l.createdAt).toLocaleString() : "—"}</td></tr>`).join("");
 
       return true;
     } catch (err) {
