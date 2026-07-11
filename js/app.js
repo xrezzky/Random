@@ -436,23 +436,29 @@ $("#chatInput")?.addEventListener("input", () => {
 async function leaveRoom(reason) {
   clearListeners();
   if (State.roomDisconnectRef) {
-    await onDisconnect(State.roomDisconnectRef).cancel();
+    await onDisconnect(State.roomDisconnectRef).cancel().catch(() => {});
     State.roomDisconnectRef = null;
   }
   if (State.room) {
-    const roomRef = ref(db, `rooms/${State.room.id}`);
-    const snap = await get(roomRef);
-    const current = snap.val();
-    if (current && current.status === "closed") {
-      // partner already left first — safe to fully clean up now
-      await remove(roomRef);
-      await remove(ref(db, `messages/${State.room.id}`));
-      await remove(ref(db, `typing/${State.room.id}`));
-    } else {
-      await update(roomRef, {
-        status: "closed", closedAt: serverTimestamp(), closedBy: State.uid, closeReason: reason,
-      });
-      await remove(ref(db, `typing/${State.room.id}/${State.uid}`));
+    try {
+      const roomRef = ref(db, `rooms/${State.room.id}`);
+      const snap = await get(roomRef);
+      const current = snap.val();
+      if (current && current.status === "closed") {
+        // partner already left first — safe to fully clean up now
+        await remove(roomRef);
+        await remove(ref(db, `messages/${State.room.id}`));
+        await remove(ref(db, `typing/${State.room.id}`));
+      } else {
+        await update(roomRef, {
+          status: "closed", closedAt: serverTimestamp(), closedBy: State.uid, closeReason: reason,
+        });
+        await remove(ref(db, `typing/${State.room.id}/${State.uid}`));
+      }
+    } catch (err) {
+      // Cleanup failing (e.g. rules not yet deployed) must never trap the
+      // user in the chat screen — log it and move on regardless.
+      console.error("leaveRoom cleanup error", err);
     }
   }
   State.room = null;
