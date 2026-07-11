@@ -24,7 +24,7 @@ export default async function handler(req, res) {
     const app = getAdminApp();
     const db = app.database();
 
-    const [sessionsSnap, queueSnap, roomsSnap, messagesSnap, reportsSnap, violationsSnap, bansSnap, aiLogsSnap] =
+    const [sessionsSnap, queueSnap, roomsSnap, messagesSnap, reportsSnap, violationsSnap, bansSnap, aiLogsSnap, strikesSnap] =
       await Promise.all([
         db.ref("sessions").once("value"),
         db.ref("queue").once("value"),
@@ -32,8 +32,9 @@ export default async function handler(req, res) {
         db.ref("messages").once("value"),
         db.ref("reports").limitToLast(30).once("value"),
         db.ref("violations").limitToLast(30).once("value"),
-        db.ref("bans").limitToLast(30).once("value"),
+        db.ref("bans").once("value"),
         db.ref("moderationLogs").limitToLast(30).once("value"),
+        db.ref("strikes").once("value"),
       ]);
 
     const sessions = sessionsSnap.val() || {};
@@ -55,6 +56,7 @@ export default async function handler(req, res) {
       violations: toList(violationsSnap.val()),
       bans: toList(bansSnap.val()),
       aiLogs: toList(aiLogsSnap.val()),
+      strikes: Object.entries(strikesSnap.val() || {}).map(([uid, count]) => ({ uid, count })),
     });
   } catch (err) {
     console.error("admin-data error", err);

@@ -1,28 +1,32 @@
 // ============================================================
 // POST /api/moderate  { text: string }
-// -> { ok: boolean, reason?: string, severity?: "low"|"medium"|"high", held?: boolean }
+// Header (optional but needed for strike tracking): Authorization: Bearer <Firebase ID token>
+// -> { ok, reason?, severity?, action, strikeCount?, held? }
 //
-// Only called for messages the client already flagged as "suspicious"
-// (see public/js/moderation.js looksSuspicious()) — plain conversation
-// never reaches this endpoint at all.
+// Only ever called by the client when the message contains a word from
+// SENSITIVE_WORDS (see public/js/moderation.js) — normal conversation never
+// reaches this endpoint, which is the whole cost-saving point.
 //
-// AI 1 (primary): Groq — tries GROQ_API_KEY_1..10 in order, rotating past
-//   any key that's rate-limited or invalid.
-// AI 2 (backup): OpenRouter — only used if EVERY Groq key fails (timeout,
-//   error, rate limit). Tries OPENROUTER_API_KEY_1..10 the same way.
-// If AI 1 and AI 2 both fail entirely: the message is HELD (ok:false,
-//   held:true) rather than allowed through — the client shows a
-//   "moderation temporarily unavailable" notice and does not send it.
+// AI 1 (primary): Groq — tries GROQ_API_KEY_1..10, rotating past any key
+//   that's rate-limited/invalid.
+// AI 2 (backup): OpenRouter — only if EVERY Groq key fails. Tries
+//   OPENROUTER_API_KEY_1..10 the same way.
+// If both fail entirely: the message is HELD (action:"block", held:true) —
+//   never allowed through silently.
 //
-// Every check that reaches this endpoint is logged to
-// /moderationLogs in Firebase (message, verdict, which provider answered,
-// timestamp) so it shows up in the admin dashboard.
+// STRIKE SYSTEM (server-authoritative, via Firebase Admin SDK so a client
+// can't fake its own strike count):
+//   Every non-"allow" verdict adds 1 strike to /strikes/{uid}.
+//   1st strike  -> action escalates to "warn"      (message still sent)
+//   2nd strike  -> action escalates to "cooldown"   (blocks sending ~20s)
+//   3rd strike  -> action escalates to "disconnect" (room is ended)
+//   5th+ strike -> action escalates to "temporary_ban" (writes /bans/{uid})
+// Strikes only apply when the caller's Firebase ID token verifies — if it's
+// missing/invalid we still return the base AI verdict, just without strike
+// tracking, so a token hiccup never breaks moderation entirely.
 //
-// Note on naming: you asked for "Grok" as AI 1 — this uses Groq (the fast
-// Llama-hosting API, api.groq.com), matching the GROQ_API_KEY env vars
-// already set in Vercel. xAI's actual Grok API is a different product with
-// different env vars; say the word if you specifically meant that one and
-// this can be swapped.
+// Every check is logged to /moderationLogs, and every non-"allow" verdict
+// is also logged to /violations — both readable from the admin dashboard.
 // ============================================================
 import { getAdminApp } from "./_firebaseAdmin.js";
 
@@ -40,62 +44,28 @@ const OPENROUTER_KEYS = getKeys("OPENROUTER_API_KEY_"); // OPENROUTER_API_KEY_1 
 const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.1-8b-instant";
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || "meta-llama/llama-3.1-8b-instruct";
 
-const SYSTEM_PROMPT = `Kamu adalah AI moderator untuk platform chat anonim 1 lawan 1 milik XRZ.
+const BAN_DURATION_MS = 30 * 60 * 1000; // 30 minutes
+const STRIKE_ESCALATION = { 1: "warn", 2: "cooldown", 3: "disconnect" };
+const BAN_THRESHOLD = 5;
 
-Tugasmu hanya menilai SATU pesan pengguna.
+const SYSTEM_PROMPT = `You are a content moderation classifier for an anonymous 1:1 text chat platform.
+Classify the SINGLE user message below. Respond with ONLY a JSON object, no other text, no markdown fences:
+{"ok": boolean, "reason": string, "severity": "low"|"medium"|"high", "action": "allow"|"warn"|"block"}
 
-Balas HANYA dalam format JSON berikut, tanpa penjelasan tambahan:
+Set "ok": false and pick "reason" from this list if the message violates it:
+- "harassment": insults, bullying, degrading someone
+- "threat": threatening violence or harm
+- "scam": phishing, money requests, fraudulent offers
+- "illegal": promoting illegal acts (drugs, csam, weapons trafficking, etc.)
+- "explicit": sexual content or solicitation
+- "promo": spam self-promotion (channels, other platforms, "dm me on...")
+Otherwise set "ok": true, "reason": "none", "action": "allow".
 
-{
-  "ok": true,
-  "reason": "none",
-  "severity": "low"
-}
+Choose "action" when ok is false:
+- "warn": mild/borderline (e.g. crude language used as an exclamation, not aimed to hurt) — message can still go through, sender just gets warned.
+- "block": clear violations — harassment aimed AT the other person, threats, scams, illegal content, explicit solicitation, spam/self-promo.
 
-atau
-
-{
-  "ok": false,
-  "reason": "harassment",
-  "severity": "medium"
-}
-
-Aturan penilaian:
-
-- "harassment"
-  Menghina, merendahkan, membully, melecehkan, menyerang seseorang secara pribadi.
-
-- "threat"
-  Ancaman kekerasan, ancaman pembunuhan, ancaman menyakiti orang lain atau diri sendiri.
-
-- "scam"
-  Penipuan, phishing, meminta uang dengan tipu daya, investasi bodong, hadiah palsu.
-
-- "illegal"
-  Mengajak atau mempromosikan kegiatan ilegal seperti narkoba, perdagangan senjata, eksploitasi anak, pembobolan akun, malware, dan tindakan melanggar hukum lainnya.
-
-- "explicit"
-  Konten seksual vulgar, ajakan seksual, prostitusi, atau permintaan konten dewasa.
-
-- "promo"
-  Spam promosi, iklan, mengajak pindah ke platform lain (WhatsApp, Telegram, Discord, Instagram, TikTok, dll.), mengirim link promosi berulang.
-
-Jika pesan tidak melanggar aturan di atas:
-
-{
-  "ok": true,
-  "reason": "none",
-  "severity": "low"
-}
-
-Pedoman tambahan:
-
-- Kata kasar ringan dalam percakapan biasa belum tentu pelanggaran.
-- Candaan antar teman boleh jika tidak mengandung ancaman atau pelecehan serius.
-- Jangan terlalu sensitif terhadap slang Indonesia.
-- Pertimbangkan konteks kalimat secara keseluruhan, bukan hanya satu kata.
-- Jika ragu, pilih "ok": true.
-- Gunakan "severity": "high" hanya untuk ancaman serius, konten seksual eksplisit, penipuan berat, atau aktivitas ilegal yang jelas.`;
+Be reasonable: casual swearing, jokes, or ordinary conversation is "ok": true, "action": "allow".`;
 
 async function callChatCompletion(baseUrl, key, model, text, extraHeaders = {}) {
   const controller = new AbortController();
@@ -128,7 +98,7 @@ async function callChatCompletion(baseUrl, key, model, text, extraHeaders = {}) 
   }
   if (!res.ok) {
     const err = new Error(`provider_error_${res.status}`);
-    err.retryable = true; // treat any non-2xx as "try the next key/provider"
+    err.retryable = true;
     throw err;
   }
 
@@ -136,10 +106,12 @@ async function callChatCompletion(baseUrl, key, model, text, extraHeaders = {}) 
   const raw = data?.choices?.[0]?.message?.content?.trim() || "";
   const cleaned = raw.replace(/^```json\s*|```$/g, "").trim();
   const parsed = JSON.parse(cleaned);
+  const ok = parsed.ok !== false;
   return {
-    ok: parsed.ok !== false,
+    ok,
     reason: parsed.reason && parsed.reason !== "none" ? parsed.reason : undefined,
     severity: parsed.severity || "low",
+    action: parsed.action || (ok ? "allow" : "block"),
   };
 }
 
@@ -148,11 +120,66 @@ async function tryProvider(keys, baseUrl, model, text, extraHeaders) {
     try {
       return await callChatCompletion(baseUrl, key, model, text, extraHeaders);
     } catch (err) {
-      if (err.retryable) continue; // rotate to next key
+      if (err.retryable) continue;
       throw err;
     }
   }
-  return null; // every key in this provider exhausted
+  return null;
+}
+
+async function verifyUid(req) {
+  const authHeader = req.headers.authorization || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+  if (!token) return null;
+  try {
+    const app = getAdminApp();
+    const decoded = await app.auth().verifyIdToken(token);
+    return decoded.uid;
+  } catch (err) {
+    console.warn("moderate: ID token verification failed", err.message);
+    return null;
+  }
+}
+
+// Increments /strikes/{uid} atomically and returns the new count plus any
+// escalation the strike thresholds trigger. Also writes /bans/{uid} when the
+// ban threshold is crossed.
+async function recordStrike(uid) {
+  const app = getAdminApp();
+  const db = app.database();
+  const result = await db.ref(`strikes/${uid}`).transaction((current) => (current || 0) + 1);
+  const count = result.snapshot.val() || 1;
+
+  let escalation = null;
+  if (count >= BAN_THRESHOLD) {
+    escalation = "temporary_ban";
+    await db.ref(`bans/${uid}`).set({
+      reason: "strike_threshold",
+      strikeCount: count,
+      bannedUntil: Date.now() + BAN_DURATION_MS,
+      createdAt: Date.now(),
+    });
+  } else if (STRIKE_ESCALATION[count]) {
+    escalation = STRIKE_ESCALATION[count];
+  }
+  return { count, escalation };
+}
+
+async function logViolation(uid, text, verdict, action, strikeCount) {
+  try {
+    const app = getAdminApp();
+    await app.database().ref("violations").push({
+      sessionId: uid || "unverified",
+      violationType: verdict.reason || "flagged",
+      severity: verdict.severity || "low",
+      evidence: text,
+      action,
+      strikeCount: strikeCount ?? null,
+      createdAt: Date.now(),
+    });
+  } catch (err) {
+    console.error("violation log failed", err);
+  }
 }
 
 async function logModeration(entry) {
@@ -160,21 +187,23 @@ async function logModeration(entry) {
     const app = getAdminApp();
     await app.database().ref("moderationLogs").push({ ...entry, createdAt: Date.now() });
   } catch (err) {
-    console.error("moderation log write failed", err); // logging failure should never block the response
+    console.error("moderation log write failed", err);
   }
 }
 
 export default async function handler(req, res) {
   if (req.method !== "POST") {
-    res.status(405).json({ ok: true, degraded: true });
+    res.status(405).json({ ok: true, action: "allow", degraded: true });
     return;
   }
 
   const { text } = req.body || {};
   if (!text || !text.trim()) {
-    res.status(200).json({ ok: false, reason: "empty" });
+    res.status(200).json({ ok: false, action: "block", reason: "empty" });
     return;
   }
+
+  const uid = await verifyUid(req); // null = no strike tracking for this call, verdict still applies
 
   let verdict = null;
   let provider = null;
@@ -184,7 +213,6 @@ export default async function handler(req, res) {
       verdict = await tryProvider(GROQ_KEYS, "https://api.groq.com/openai/v1/chat/completions", GROQ_MODEL, text);
       if (verdict) provider = "groq";
     }
-
     if (!verdict && OPENROUTER_KEYS.length) {
       verdict = await tryProvider(
         OPENROUTER_KEYS,
@@ -200,12 +228,26 @@ export default async function handler(req, res) {
   }
 
   if (!verdict) {
-    // Both AI 1 and AI 2 failed entirely — hold the message, don't allow it.
     await logModeration({ text, provider: "none", verdict: "held" });
-    res.status(200).json({ ok: false, held: true });
+    res.status(200).json({ ok: false, held: true, action: "block" });
     return;
   }
 
-  await logModeration({ text, provider, verdict: verdict.ok ? "ok" : verdict.reason, severity: verdict.severity });
-  res.status(200).json(verdict);
+  let action = verdict.action;
+  let strikeCount = null;
+
+  if (action !== "allow") {
+    if (uid) {
+      const { count, escalation } = await recordStrike(uid);
+      strikeCount = count;
+      if (escalation) action = escalation;
+    }
+    await logViolation(uid, text, verdict, action, strikeCount);
+  }
+
+  await logModeration({
+    text, provider, verdict: verdict.ok ? "ok" : verdict.reason, severity: verdict.severity, action, uid: uid || "unverified",
+  });
+
+  res.status(200).json({ ok: verdict.ok, reason: verdict.reason, severity: verdict.severity, action, strikeCount });
 }
