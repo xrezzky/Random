@@ -1,40 +1,75 @@
 // ============================================================
-// Two-stage moderation, client side:
+// Cost-efficient AI moderation gate.
 //
 //   1. localCheck()   — instant, local: empty/too-long/repeated-char spam
-//                        and flood/rate-limit. No network call.
-//   2. remoteCheck()  — only actually calls /api/moderate if the message
-//                        LOOKS suspicious (looksSuspicious() below). Plain
-//                        conversation skips the AI call entirely and goes
-//                        straight through — cheaper and faster.
-//
-// /api/moderate itself tries Grok/Groq first, falls back to OpenRouter if
-// that fails, and if BOTH fail it returns { held: true } — meaning the
-// message must NOT be sent, and the user should be told moderation is
-// temporarily down (see app.js chatForm handler).
+//                        and flood/rate-limit. No network call, runs on
+//                        every message.
+//   2. containsSensitiveWord(text) — simple case-insensitive word match
+//                        against SENSITIVE_WORDS below. This is the ONLY
+//                        thing that decides whether AI gets called at all.
+//                        Normal conversation never touches the API.
+//   3. remoteCheck(text) — only invoked by app.js when
+//                        containsSensitiveWord() is true. Calls
+//                        /api/moderate, which runs the real AI check
+//                        (Groq → OpenRouter fallback) AND applies the
+//                        server-side strike system, returning a single
+//                        `action` field app.js just has to execute:
+//                        "allow" | "warn" | "block" | "cooldown" |
+//                        "disconnect" | "temporary_ban".
 // ============================================================
+import { auth } from "./firebase-client.js";
+
+// Edit these freely — plain lowercase words/phrases, case-insensitive,
+// matched as whole words. This is the ONLY gate deciding whether a message
+// costs an API call, so keep it to genuinely sensitive terms (adding too
+// much "normal" vocabulary here just makes every message call the AI).
+const SENSITIVE_WORDS = {
+  profanityID: [
+    "anjing", "anjer", "anjrit", "bangsat", "bajingan", "kontol", "memek",
+    "ngentot", "ngewe", "asu", "babi", "goblok", "tolol", "bego", "kampret",
+    "jancok", "kacung", "monyet", "pepek", "kimak",
+  ],
+  profanityEN: [
+    "fuck", "fucking", "shit", "bitch", "asshole", "bastard", "dumbass",
+    "retard", "idiot", "stupid",
+  ],
+  threats: [
+    "bunuh", "ancam", "bacok", "tusuk", "gorok", "kill you", "i will kill",
+    "hurt you", "i'll find you",
+  ],
+  sexual: [
+    "nude", "nudes", "onlyfans", "sex chat", "bokep", "colmek", "porn",
+    "sange", "ngewe",
+  ],
+  scam: [
+    "gift card", "western union", "transfer dulu", "investasi bodong",
+    "crypto wallet", "send money", "kirim uang dulu", "hadiah gratis",
+  ],
+  illegal: [
+    "narkoba", "drugs", "senjata api", "beli senjata", "jual akun ilegal",
+  ],
+};
 
 const Moderation = (() => {
   const LINK_RE = /(https?:\/\/|www\.)\S+/i;
   const REPEAT_CHAR_RE = /(.)\1{7,}/; // aaaaaaaa
   let recentMessages = []; // for flood detection: [{text, ts}]
 
-  // Lightweight pre-filter: does this message even warrant an AI call?
-  // Deliberately broad/cheap — false positives just mean "send it to AI
-  // anyway", which is safe; false negatives mean skipping AI on something
-  // that needed it, so keep this list generous.
-  const SUSPICION_PATTERNS = [
-    /\b(kill|hurt|threat|bunuh|ancam)\b/i,
-    /\b(gift ?card|western union|transfer dulu|investasi|crypto wallet|send money)\b/i,
-    /\b(nude|onlyfans|sex ?chat|bokep|colmek)\b/i,
-    /\b(subscribe|dm me|check out my|follow (my|akun)|promo|jual|beli akun)\b/i,
-    /\b(drugs?|narkoba|senjata|weapon)\b/i,
-    /\b(bodoh|anjing|goblok|tolol|idiot|stupid)\b/i, // mild harassment signal
-    LINK_RE,
-  ];
+  function escapeRegex(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
 
-  function looksSuspicious(text) {
-    return SUSPICION_PATTERNS.some((re) => re.test(text));
+  function buildWordRegex() {
+    const all = Object.values(SENSITIVE_WORDS).flat();
+    if (!all.length) return null;
+    // multi-word phrases use \s+ instead of a literal space so "transfer   dulu" still matches
+    const parts = all.map((w) => escapeRegex(w).replace(/\\ /g, "\\s+"));
+    return new RegExp(`\\b(${parts.join("|")})\\b`, "i");
+  }
+  const WORD_REGEX = buildWordRegex();
+
+  // The ONLY gate deciding whether a message is even worth an API call.
+  function containsSensitiveWord(text) {
+    if (LINK_RE.test(text)) return true;
+    return WORD_REGEX ? WORD_REGEX.test(text) : false;
   }
 
   function resetFloodWindow() {
@@ -64,24 +99,26 @@ const Moderation = (() => {
     return { ok: true };
   }
 
-  // Calls /api/moderate ONLY if the message looks suspicious. Server is the
-  // source of truth for that call; this function just decides whether to
-  // bother making it.
+  // Only ever called by app.js when containsSensitiveWord(text) is true.
   async function remoteCheck(text) {
-    if (!looksSuspicious(text)) return { ok: true };
+    let idToken = null;
+    try { idToken = await auth.currentUser?.getIdToken(); } catch { /* proceed without it */ }
 
     try {
       const res = await fetch("/api/moderate", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+        },
         body: JSON.stringify({ text }),
       });
-      if (!res.ok) return { ok: false, held: true };
+      if (!res.ok) return { ok: false, held: true, action: "block" };
       return await res.json();
     } catch {
-      return { ok: false, held: true }; // network failure on a suspicious message: hold it
+      return { ok: false, held: true, action: "block" }; // network failure: hold, don't send
     }
   }
 
-  return { localCheck, remoteCheck, resetFloodWindow, looksSuspicious };
+  return { localCheck, remoteCheck, resetFloodWindow, containsSensitiveWord };
 })();

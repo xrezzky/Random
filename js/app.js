@@ -112,7 +112,17 @@ $all(".consent-box").forEach((box) => {
 $("#btnConsentContinue")?.addEventListener("click", async () => {
   showScreen("screen-queue");
   try {
-    await ensureSession();
+    const uid = await ensureSession();
+
+    const banSnap = await get(ref(db, `bans/${uid}`));
+    const ban = banSnap.val();
+    if (ban && ban.bannedUntil && ban.bannedUntil > Date.now()) {
+      const until = new Date(ban.bannedUntil).toLocaleTimeString();
+      toast(`You're temporarily restricted until ${until}.`, "danger");
+      showScreen("screen-landing");
+      return;
+    }
+
     await enterQueue();
   } catch (err) {
     console.error(err);
@@ -309,7 +319,9 @@ function handlePartnerLeft(reason) {
   el.className = "system-msg";
   el.textContent = reason === "next"
     ? "Stranger clicked Next and left the chat."
-    : "Stranger has disconnected.";
+    : reason === "violation"
+      ? "Stranger was disconnected by the moderation system."
+      : "Stranger has disconnected.";
   body.appendChild(el);
   body.scrollTop = body.scrollHeight;
 }
@@ -321,6 +333,12 @@ $("#chatForm")?.addEventListener("submit", async (e) => {
   const text = input.value;
   if (!text.trim() || !State.room) return;
 
+  if (State.cooldownUntil && Date.now() < State.cooldownUntil) {
+    const secs = Math.ceil((State.cooldownUntil - Date.now()) / 1000);
+    toast(`Please wait ${secs}s before sending another message.`, "danger");
+    return;
+  }
+
   // Quick local filter (spam/flood/rate-limit) — no network round-trip.
   const local = Moderation.localCheck(text);
   if (!local.ok) {
@@ -328,30 +346,60 @@ $("#chatForm")?.addEventListener("submit", async (e) => {
     return;
   }
 
-  input.value = "";
-  appendBubble(text, "me");
+  // FAST LANE: no sensitive word/link found — send immediately, never call AI.
+  if (!Moderation.containsSensitiveWord(text)) {
+    input.value = "";
+    appendBubble(text, "me");
+    await push(ref(db, `messages/${State.room.id}`), {
+      senderId: State.uid,
+      content: text,
+      createdAt: Date.now(),
+    });
+    return;
+  }
 
-  // AI check only runs when the message actually looks suspicious;
-  // ordinary messages go straight through (see moderation.js).
+  // SLOW LANE: sensitive word/link found — hold the message, wait for the
+  // AI verdict (+ server-side strike escalation) before doing anything.
   const verdict = await Moderation.remoteCheck(text);
 
   if (verdict.held) {
-    toast("Moderation system is temporarily unavailable — your message is on hold.", "danger");
-    return; // not persisted; sender sees it never arrived
+    toast("Sistem moderasi sedang mengalami gangguan — pesan ditahan sementara.", "danger");
+    return;
   }
 
-  if (!verdict.ok) {
-    toast(moderationMessage(verdict.reason || "flagged"), "danger");
-    await push(ref(db, "violations"), {
-      sessionId: State.uid,
-      violationType: verdict.reason || "flagged",
-      severity: verdict.severity || "low",
-      evidence: text,
-      createdAt: serverTimestamp(),
-    });
-    return; // blocked message is NOT persisted to the room
+  switch (verdict.action) {
+    case "temporary_ban":
+      toast("You've been temporarily restricted for repeated violations.", "danger");
+      await leaveRoom("violation");
+      showScreen("screen-landing");
+      return;
+
+    case "disconnect":
+      toast("Chat ended due to repeated violations.", "danger");
+      await leaveRoom("violation");
+      showScreen("screen-landing");
+      return;
+
+    case "cooldown":
+      State.cooldownUntil = Date.now() + 20000;
+      toast("Warning threshold reached — 20s cooldown before you can send again.", "danger");
+      return;
+
+    case "block":
+      toast(moderationMessage(verdict.reason || "flagged"), "danger");
+      return; // not sent
+
+    case "warn":
+      toast(`${moderationMessage(verdict.reason || "flagged")} (warning — message still sent)`, "danger");
+      break; // falls through to send below
+
+    case "allow":
+    default:
+      break; // send normally
   }
 
+  input.value = "";
+  appendBubble(text, "me");
   await push(ref(db, `messages/${State.room.id}`), {
     senderId: State.uid,
     content: text,
