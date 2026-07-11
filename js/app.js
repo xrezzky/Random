@@ -1,19 +1,30 @@
 // ============================================================
 // XRZ Anonymous Chat — app logic (Firebase Realtime Database)
+//
+// Matching model (per spec): rooms are NEVER created on Start. Clicking
+// Start only puts the user in /queue. Whenever anyone's client checks the
+// queue (on join, and on a light poll as a safety net) it looks at the
+// FULL queue, and if there are >= 2 people waiting, pairs the two
+// oldest (FIFO) and creates a room for THEM — who may or may not include
+// the client doing the checking. That's why every queued client also
+// listens on /matchAssignments/{uid}: it's how you find out someone
+// else's check paired you up.
 // ============================================================
 import { db, auth, authReady } from "./firebase-client.js";
 import {
   ref, push, set, update, remove, get, onValue, onChildAdded, off,
-  runTransaction, onDisconnect, serverTimestamp, query, orderByChild, equalTo,
+  runTransaction, onDisconnect, serverTimestamp, query, limitToLast,
 } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
 
 const State = {
   uid: null,
   displayId: null,
-  room: null,           // { id, token, partnerId }
+  room: null,            // { id, token, partnerId }
   reportReason: null,
-  listeners: [],         // [{ ref, cb, event }] for cleanup via off()
+  listeners: [],          // [{ ref, cb, event }] for cleanup via off()
   typingSendAt: 0,
+  queuePoll: null,
+  roomDisconnectRef: null,
 };
 
 // ---------------- helpers ----------------
@@ -71,11 +82,12 @@ async function ensureSession() {
     lastSeenAt: serverTimestamp(),
   });
 
-  // presence: mark online now, auto-remove on disconnect (tab close, network drop)
   const presenceRef = ref(db, `presence/${uid}`);
   await set(presenceRef, { displayId: State.displayId, at: serverTimestamp() });
   onDisconnect(presenceRef).remove();
   onDisconnect(ref(db, `sessions/${uid}/status`)).set("idle");
+  // if the tab dies while queued, don't leave a ghost entry blocking FIFO
+  onDisconnect(ref(db, `queue/${uid}`)).remove();
 
   setStatusOnline(true);
   return uid;
@@ -109,81 +121,71 @@ $("#btnConsentContinue")?.addEventListener("click", async () => {
   }
 });
 
-// ---------------- queue / matching ----------------
-// Model: rooms ARE the queue. Clicking Start either creates a fresh
-// "waiting" room (if none exist) or claims someone else's waiting room
-// directly. No separate /queue bookkeeping node — easy to eyeball in the
-// Firebase console: every /rooms/{id} is either "waiting" (1 person) or
-// "active" (2 people, chatting).
+// ---------------- queue (FIFO) / matching ----------------
 async function enterQueue() {
   const uid = await ensureSession();
   $("#queueSession").textContent = `session_${uid.slice(0, 7).toUpperCase()}`;
   $("#queueWait").textContent = "Estimated wait: a few seconds";
+
   await update(ref(db, `sessions/${uid}`), { status: "queued" });
-  await findOrCreateRoom(uid);
+  await set(ref(db, `queue/${uid}`), { joinedAt: Date.now(), displayId: State.displayId });
+
+  // Fires the moment SOME client's matching check pairs us with someone
+  // (could be triggered by our own check below, or anyone else's).
+  const assignRef = ref(db, `matchAssignments/${uid}`);
+  trackListener(assignRef, async (snap) => {
+    const val = snap.val();
+    if (val?.roomId) {
+      await remove(assignRef);
+      const roomSnap = await get(ref(db, `rooms/${val.roomId}`));
+      if (roomSnap.exists()) enterRoom(val.roomId, roomSnap.val());
+    }
+  });
+
+  await checkQueueForMatch();
+  // Safety-net poll: realtime should catch matches instantly, but in case a
+  // listener is ever missed (flaky connection), keep nudging the queue.
+  State.queuePoll = setInterval(checkQueueForMatch, 3000);
 }
 
-async function findOrCreateRoom(uid) {
-  // 1. Look for someone else's waiting room and try to claim it.
-  const waitingQuery = query(ref(db, "rooms"), orderByChild("status"), equalTo("waiting"));
-  const snap = await get(waitingQuery);
-  const candidates = [];
-  snap.forEach((child) => {
-    const val = child.val();
-    if (val.userA !== uid) candidates.push({ id: child.key, createdAt: val.createdAt || 0 });
+// The "server watches the queue" step. Any client calling this may end up
+// pairing two OTHER users, not itself — that's expected and correct FIFO
+// behavior. Atomic via a transaction scoped to /queue.
+async function checkQueueForMatch() {
+  let pair = null;
+
+  await runTransaction(ref(db, "queue"), (current) => {
+    if (!current) return; // nobody waiting — abort, no write
+    const entries = Object.entries(current).sort((a, b) => (a[1].joinedAt || 0) - (b[1].joinedAt || 0));
+    if (entries.length < 2) return; // fewer than 2 waiting — abort, no write
+
+    const [idA] = entries[0];
+    const [idB] = entries[1];
+    pair = [idA, idB];
+    delete current[idA];
+    delete current[idB];
+    return current;
   });
-  candidates.sort((a, b) => a.createdAt - b.createdAt);
 
-  for (const candidate of candidates) {
-    const claimedRoom = await claimRoom(candidate.id, uid);
-    if (claimedRoom) {
-      await update(ref(db, `sessions/${uid}`), { status: "matched" });
-      await update(ref(db, `sessions/${claimedRoom.userA}`), { status: "matched" });
-      await enterRoom(candidate.id, claimedRoom);
-      return;
-    }
-    // someone else claimed it first (or it's stale) — try the next candidate
-  }
+  if (!pair) return;
+  await createRoomForPair(pair[0], pair[1]);
+}
 
-  // 2. Nothing available right now: create our own waiting room and listen
-  // for someone to join it.
+async function createRoomForPair(idA, idB) {
   const roomRef = push(ref(db, "rooms"));
   const roomId = roomRef.key;
   const roomData = {
-    token: `room_${roomId.slice(0, 7).toUpperCase()}`,
-    userA: uid,
-    userB: null,
-    status: "waiting",
-    createdAt: Date.now(),
+    token: `room_${roomId.slice(0, 7).toLowerCase()}`,
+    userA: idA,
+    userB: idB,
+    status: "active",
+    createdAt: serverTimestamp(),
   };
   await set(roomRef, roomData);
-  State.myWaitingRoomId = roomId;
-
-  trackListener(ref(db, `rooms/${roomId}`), (roomSnap) => {
-    const val = roomSnap.val();
-    if (val && val.status === "active" && val.userB) {
-      State.myWaitingRoomId = null;
-      enterRoom(roomId, val);
-    }
-  });
-}
-
-// Atomic claim: a Firebase transaction scoped to this ONE room node means
-// two people can't both claim the same waiting room, even if they search
-// at the exact same instant.
-async function claimRoom(roomId, uid) {
-  const result = await runTransaction(ref(db, `rooms/${roomId}`), (current) => {
-    if (!current || current.status !== "waiting" || current.userA === uid) {
-      return; // undefined = abort transaction, no change made
-    }
-    current.userB = uid;
-    current.status = "active";
-    return current;
-  });
-  if (result.committed && result.snapshot.val()?.status === "active" && result.snapshot.val()?.userB === uid) {
-    return result.snapshot.val();
-  }
-  return null;
+  await update(ref(db, `sessions/${idA}`), { status: "matched" });
+  await update(ref(db, `sessions/${idB}`), { status: "matched" });
+  await set(ref(db, `matchAssignments/${idA}`), { roomId });
+  await set(ref(db, `matchAssignments/${idB}`), { roomId });
 }
 
 $("#btnCancelQueue")?.addEventListener("click", async () => {
@@ -192,19 +194,22 @@ $("#btnCancelQueue")?.addEventListener("click", async () => {
 });
 
 async function leaveQueue() {
+  clearInterval(State.queuePoll);
+  State.queuePoll = null;
   clearListeners();
-  if (State.myWaitingRoomId) {
-    await remove(ref(db, `rooms/${State.myWaitingRoomId}`));
-    State.myWaitingRoomId = null;
-  }
   if (State.uid) {
+    await remove(ref(db, `queue/${State.uid}`));
+    await remove(ref(db, `matchAssignments/${State.uid}`));
     await update(ref(db, `sessions/${State.uid}`), { status: "idle" });
   }
 }
 
 // ---------------- room / chat ----------------
 async function enterRoom(roomId, room) {
+  clearInterval(State.queuePoll);
+  State.queuePoll = null;
   clearListeners();
+
   const partnerId = room.userA === State.uid ? room.userB : room.userA;
   const partnerSnap = await get(ref(db, `sessions/${partnerId}/displayId`));
 
@@ -216,15 +221,21 @@ async function enterRoom(roomId, room) {
 
   showScreen("screen-chat");
 
-  // messages: only react to NEW children so we never re-render history
-  trackListener(ref(db, `messages/${roomId}`), (snap) => renderIncomingMessage(snap.val()), "child_added");
-
-  // room status (partner disconnects)
-  trackListener(ref(db, `rooms/${roomId}/status`), (snap) => {
-    if (snap.val() === "closed" && State.room?.id === roomId) handlePartnerLeft();
+  // If the tab dies mid-chat, mark the room closed so the partner is told.
+  State.roomDisconnectRef = ref(db, `rooms/${roomId}`);
+  onDisconnect(State.roomDisconnectRef).update({
+    status: "closed", closedAt: serverTimestamp(), closedBy: State.uid, closeReason: "disconnect",
   });
 
-  // typing indicator from partner
+  trackListener(ref(db, `messages/${roomId}`), (snap) => renderIncomingMessage(snap.val()), "child_added");
+
+  trackListener(ref(db, `rooms/${roomId}`), (snap) => {
+    const val = snap.val();
+    if (val && val.status === "closed" && val.closedBy !== State.uid && State.room?.id === roomId) {
+      handlePartnerLeft(val.closeReason);
+    }
+  });
+
   trackListener(ref(db, `typing/${roomId}/${partnerId}`), (snap) => {
     const ts = snap.val();
     if (ts && Date.now() - ts < 2500) showTyping();
@@ -259,22 +270,26 @@ function showTyping() {
   typingHideTimer = setTimeout(() => { $("#typingRow").hidden = true; }, 2000);
 }
 
-function handlePartnerLeft() {
+function handlePartnerLeft(reason) {
   $("#chatStatusLine").textContent = "Partner disconnected";
   const body = $("#chatBody");
   const el = document.createElement("div");
   el.className = "system-msg";
-  el.textContent = "Stranger has disconnected.";
+  el.textContent = reason === "next"
+    ? "Stranger clicked Next and left the chat."
+    : "Stranger has disconnected.";
   body.appendChild(el);
   body.scrollTop = body.scrollHeight;
 }
 
+// ---------------- sending / moderation ----------------
 $("#chatForm")?.addEventListener("submit", async (e) => {
   e.preventDefault();
   const input = $("#chatInput");
   const text = input.value;
   if (!text.trim() || !State.room) return;
 
+  // Quick local filter (spam/flood/rate-limit) — no network round-trip.
   const local = Moderation.localCheck(text);
   if (!local.ok) {
     toast(moderationMessage(local.reason), "danger");
@@ -284,13 +299,21 @@ $("#chatForm")?.addEventListener("submit", async (e) => {
   input.value = "";
   appendBubble(text, "me");
 
-  const remote = await Moderation.remoteCheck(text);
-  if (!remote.ok) {
-    toast(moderationMessage(remote.reason || "flagged"), "danger");
+  // AI check only runs when the message actually looks suspicious;
+  // ordinary messages go straight through (see moderation.js).
+  const verdict = await Moderation.remoteCheck(text);
+
+  if (verdict.held) {
+    toast("Moderation system is temporarily unavailable — your message is on hold.", "danger");
+    return; // not persisted; sender sees it never arrived
+  }
+
+  if (!verdict.ok) {
+    toast(moderationMessage(verdict.reason || "flagged"), "danger");
     await push(ref(db, "violations"), {
       sessionId: State.uid,
-      violationType: remote.reason || "flagged",
-      severity: remote.severity || "low",
+      violationType: verdict.reason || "flagged",
+      severity: verdict.severity || "low",
       evidence: text,
       createdAt: serverTimestamp(),
     });
@@ -330,28 +353,44 @@ $("#chatInput")?.addEventListener("input", () => {
 });
 
 // ---------------- next / disconnect ----------------
-async function leaveRoom() {
+async function leaveRoom(reason) {
   clearListeners();
+  if (State.roomDisconnectRef) {
+    await onDisconnect(State.roomDisconnectRef).cancel();
+    State.roomDisconnectRef = null;
+  }
   if (State.room) {
-    await update(ref(db, `rooms/${State.room.id}`), { status: "closed", closedAt: serverTimestamp() });
-    await remove(ref(db, `typing/${State.room.id}/${State.uid}`));
+    const roomRef = ref(db, `rooms/${State.room.id}`);
+    const snap = await get(roomRef);
+    const current = snap.val();
+    if (current && current.status === "closed") {
+      // partner already left first — safe to fully clean up now
+      await remove(roomRef);
+      await remove(ref(db, `messages/${State.room.id}`));
+      await remove(ref(db, `typing/${State.room.id}`));
+    } else {
+      await update(roomRef, {
+        status: "closed", closedAt: serverTimestamp(), closedBy: State.uid, closeReason: reason,
+      });
+      await remove(ref(db, `typing/${State.room.id}/${State.uid}`));
+    }
   }
   State.room = null;
 }
 
 $("#btnNext")?.addEventListener("click", async () => {
-  await leaveRoom();
+  await leaveRoom("next");
   showScreen("screen-queue");
   await enterQueue();
 });
 
 $("#btnDisconnect")?.addEventListener("click", async () => {
-  await leaveRoom();
+  await leaveRoom("disconnect");
   await update(ref(db, `sessions/${State.uid}`), { status: "idle" });
   showScreen("screen-landing");
 });
 
-// ---------------- report modal ----------------
+// ---------------- report modal (stores last 20 messages as evidence) ----------------
 $("#btnReport")?.addEventListener("click", () => {
   if (!State.room) return; // only reportable from an active chat
   State.reportReason = null;
@@ -374,12 +413,18 @@ $all(".reason-chip").forEach((chip) => {
 
 $("#btnSubmitReport")?.addEventListener("click", async () => {
   if (!State.reportReason || !State.room) return;
+
+  const recentSnap = await get(query(ref(db, `messages/${State.room.id}`), limitToLast(20)));
+  const evidenceMessages = [];
+  recentSnap.forEach((child) => evidenceMessages.push({ id: child.key, ...child.val() }));
+
   await push(ref(db, "reports"), {
     roomId: State.room.id,
     reporterId: State.uid,
     reportedId: State.room.partnerId,
     reason: State.reportReason,
     details: $("#reportDetails").value.trim() || null,
+    evidenceMessages,
     status: "open",
     createdAt: serverTimestamp(),
   });
@@ -397,7 +442,6 @@ async function initOnlineCounter() {
 }
 initOnlineCounter();
 
-// keep last_seen fresh
 setInterval(() => {
   if (State.uid) update(ref(db, `sessions/${State.uid}`), { lastSeenAt: serverTimestamp() });
 }, 20000);
