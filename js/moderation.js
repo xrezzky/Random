@@ -25,9 +25,10 @@ import { auth } from "./firebase-client.js";
 // much "normal" vocabulary here just makes every message call the AI).
 const SENSITIVE_WORDS = {
   profanityID: [
-    "anjing", "anjer", "anjrit", "bangsat", "bajingan", "kontol", "memek",
-    "ngentot", "ngewe", "asu", "babi", "goblok", "tolol", "bego", "kampret",
-    "jancok", "kacung", "monyet", "pepek", "kimak",
+    "anjing", "anjer", "anjrit", "anjir", "njir", "bangsat", "bajingan",
+    "kontol", "memek", "ngentot", "ngewe", "asu", "babi", "goblok", "tolol",
+    "bego", "kampret", "jancok", "kacung", "monyet", "pepek", "kimak",
+    "sialan", "brengsek", "keparat", "taik", "tai lu", "kntl",
   ],
   profanityEN: [
     "fuck", "fucking", "shit", "bitch", "asshole", "bastard", "dumbass",
@@ -60,8 +61,7 @@ const Moderation = (() => {
   function buildWordRegex() {
     const all = Object.values(SENSITIVE_WORDS).flat();
     if (!all.length) return null;
-    // multi-word phrases use \s+ instead of a literal space so "transfer   dulu" still matches
-    const parts = all.map((w) => escapeRegex(w).replace(/\\ /g, "\\s+"));
+    const parts = all.map((w) => escapeRegex(w).replace(/ /g, "\\s+"));
     return new RegExp(`\\b(${parts.join("|")})\\b`, "i");
   }
   const WORD_REGEX = buildWordRegex();
