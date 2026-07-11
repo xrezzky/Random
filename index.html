@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
+<title>XRZ — Anonymous Random Chat</title>
+<meta name="description" content="Meet random people instantly. No account required. Just chat." />
+<link rel="icon" href="icons/favicon.svg" type="image/svg+xml" />
+<link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+<!-- ============ NAV ============ -->
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="logo" aria-label="XRZ">
+      <svg width="36" height="36" viewBox="0 0 36 36" fill="none">
+        <rect x="1.5" y="1.5" width="33" height="33" rx="9" fill="#2563EB" stroke="#0B1220" stroke-width="3"/>
+        <path d="M10 10L26 26M26 10L10 26" stroke="white" stroke-width="4" stroke-linecap="round"/>
+      </svg>
+      <span>XRZ</span>
+    </div>
+    <div class="topbar-status" id="topbarStatus">
+      <span class="dot dot-off" id="statusDot"></span>
+      <span id="statusText">Offline</span>
+    </div>
+  </div>
+</header>
+
+<main id="app">
+
+  <!-- ============ SCREEN: LANDING ============ -->
+  <section class="screen active" id="screen-landing">
+    <div class="hero-card">
+      <span class="eyebrow">No login · No email · No trace</span>
+      <h1>Anonymous Random Chat</h1>
+      <p class="lead">Meet random people instantly. No account required. No registration. Just chat.</p>
+      <div class="hero-actions">
+        <button class="btn btn-primary btn-lg" id="btnStartChat">Start Chat</button>
+      </div>
+      <div class="hero-links">
+        <button class="link-btn" id="btnPrivacy">Privacy Policy</button>
+        <span class="sep">·</span>
+        <button class="link-btn" id="btnTerms">Terms</button>
+      </div>
+    </div>
+    <div class="hero-meta">
+      <div class="meta-card">
+        <strong id="onlineCount">—</strong>
+        <span>people online now</span>
+      </div>
+      <div class="meta-card">
+        <strong>0:00</strong>
+        <span>avg. matching time</span>
+      </div>
+      <div class="meta-card">
+        <strong>AI</strong>
+        <span>monitored for safety</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ SCREEN: CONSENT ============ -->
+  <section class="screen" id="screen-consent">
+    <div class="panel-card">
+      <h2>Before you jump in</h2>
+      <p class="muted">Please confirm all four to continue.</p>
+      <div class="check-list">
+        <label class="check-row">
+          <input type="checkbox" class="consent-box" />
+          <span>I agree to the <button class="inline-link" id="linkTos1">Terms of Service</button>.</span>
+        </label>
+        <label class="check-row">
+          <input type="checkbox" class="consent-box" />
+          <span>I agree to the <button class="inline-link" id="linkPrivacy1">Privacy Policy</button>.</span>
+        </label>
+        <label class="check-row">
+          <input type="checkbox" class="consent-box" />
+          <span>I understand chats are monitored by AI for safety.</span>
+        </label>
+        <label class="check-row">
+          <input type="checkbox" class="consent-box" />
+          <span>I understand violations may result in removal or temporary restriction.</span>
+        </label>
+      </div>
+      <div class="panel-actions">
+        <button class="btn btn-ghost" id="btnConsentBack">Back</button>
+        <button class="btn btn-primary" id="btnConsentContinue" disabled>Start Matching</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ SCREEN: QUEUE ============ -->
+  <section class="screen" id="screen-queue">
+    <div class="panel-card center">
+      <div class="pulse-ring"><div class="pulse-core"></div></div>
+      <h2>Searching partner…</h2>
+      <p class="muted" id="queueSession">session_—</p>
+      <p class="muted" id="queueWait">Estimated wait: calculating…</p>
+      <button class="btn btn-danger-outline" id="btnCancelQueue">Cancel</button>
+    </div>
+  </section>
+
+  <!-- ============ SCREEN: CHAT ============ -->
+  <section class="screen" id="screen-chat">
+    <div class="chat-shell">
+      <div class="chat-header">
+        <div class="chat-partner">
+          <span class="dot dot-on"></span>
+          <div>
+            <strong id="partnerId">Anonymous-0000</strong>
+            <div class="chat-sub" id="chatStatusLine">Partner connected</div>
+          </div>
+        </div>
+        <div class="chat-header-actions">
+          <button class="btn btn-sm btn-ghost" id="btnReport">Report</button>
+          <button class="btn btn-sm btn-danger-outline" id="btnDisconnect">Disconnect</button>
+        </div>
+      </div>
+
+      <div class="chat-body" id="chatBody">
+        <div class="system-msg">You're now chatting with a stranger. Say hi 👋</div>
+      </div>
+
+      <div class="typing-row" id="typingRow" hidden>
+        <span class="typing-dots"><i></i><i></i><i></i></span> Stranger is typing…
+      </div>
+
+      <form class="chat-input-row" id="chatForm">
+        <input type="text" id="chatInput" maxlength="500" placeholder="Type a message…" autocomplete="off" />
+        <button type="submit" class="btn btn-primary" id="btnSend">Send</button>
+      </form>
+
+      <div class="chat-footer-actions">
+        <button class="btn btn-secondary" id="btnNext">Next Partner</button>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ============ REPORT MODAL ============ -->
+<div class="modal-overlay" id="reportModal" hidden>
+  <div class="modal-card">
+    <h3>Report this user</h3>
+    <p class="muted">Your report is sent straight to the moderation team.</p>
+    <div class="reason-grid" id="reasonGrid">
+      <button class="reason-chip" data-reason="spam">Spam</button>
+      <button class="reason-chip" data-reason="harassment">Harassment</button>
+      <button class="reason-chip" data-reason="threat">Threat</button>
+      <button class="reason-chip" data-reason="scam">Scam</button>
+      <button class="reason-chip" data-reason="explicit">Explicit Content</button>
+      <button class="reason-chip" data-reason="illegal">Illegal Content</button>
+      <button class="reason-chip" data-reason="other">Other</button>
+    </div>
+    <textarea id="reportDetails" placeholder="Optional details…" maxlength="300"></textarea>
+    <div class="panel-actions">
+      <button class="btn btn-ghost" id="btnCancelReport">Cancel</button>
+      <button class="btn btn-danger" id="btnSubmitReport" disabled>Submit Report</button>
+    </div>
+  </div>
+</div>
+
+<!-- ============ TOASTS ============ -->
+<div class="toast-stack" id="toastStack"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2" defer></script>
+<script src="js/supabase-client.js" defer></script>
+<script src="js/moderation.js" defer></script>
+<script src="js/app.js" defer></script>
+</body>
+</html>
