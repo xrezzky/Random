@@ -100,7 +100,7 @@ async function ensureSession() {
   const uid = auth.currentUser.uid;
   State.uid = uid;
   State.displayId = randomId("Guest");
-  dlog(`ensureSession: uid=${uid.slice(0, 8)} displayId=${State.displayId}`);
+  dlog(`[SESSION] ensureSession: uid=${uid.slice(0, 8)} displayId=${State.displayId}`);
 
   await step("sessions-write", () => set(ref(db, `sessions/${uid}`), {
     displayId: State.displayId,
@@ -108,11 +108,11 @@ async function ensureSession() {
     createdAt: serverTimestamp(),
     lastSeenAt: serverTimestamp(),
   }));
-  dlog("sessions-write OK");
+  dlog("[SESSION] sessions-write OK");
 
   const presenceRef = ref(db, `presence/${uid}`);
   await step("presence-write", () => set(presenceRef, { displayId: State.displayId, at: serverTimestamp() }));
-  dlog("presence-write OK");
+  dlog("[SESSION] presence-write OK");
   onDisconnect(presenceRef).remove().catch((e) => console.error("onDisconnect presence failed", e));
   onDisconnect(ref(db, `sessions/${uid}/status`)).set("idle").catch((e) => console.error("onDisconnect status failed", e));
   // if the tab dies while queued, don't leave a ghost entry blocking FIFO
@@ -139,7 +139,7 @@ $all(".consent-box").forEach((box) => {
 });
 
 $("#btnConsentContinue")?.addEventListener("click", async () => {
-  dlog("btnConsentContinue clicked");
+  dlog("[UI] btnConsentContinue clicked");
   showScreen("screen-queue");
   try {
     const uid = await ensureSession();
@@ -159,7 +159,7 @@ $("#btnConsentContinue")?.addEventListener("click", async () => {
     const parts = [err?.name, err?.code, err?.message].filter(Boolean);
     const detail = parts.length ? parts.join(" | ") : String(err);
     const label = err?.stepLabel ? ` [${err.stepLabel}]` : "";
-    dlog(`ERROR${label}: ${detail}`);
+    dlog(`[SESSION] ERROR${label}: ${detail}`);
     toast(`Session error${label}: ${detail}`, "danger");
     showScreen("screen-landing");
   }
@@ -174,7 +174,7 @@ async function enterQueue() {
   State.inQueue = true;
   await step("session-status-queued", () => update(ref(db, `sessions/${uid}`), { status: "queued" }));
   await step("queue-write", () => set(ref(db, `queue/${uid}`), { joinedAt: Date.now(), displayId: State.displayId }));
-  dlog(`queue-write OK, joined queue as ${uid.slice(0, 8)}`);
+  dlog(`[QUEUE] queue-write OK, joined as ${uid.slice(0, 8)}`);
 
   trackListener(ref(db, "queue"), (snap) => {
     const n = snap.exists() ? Object.keys(snap.val()).length : 0;
@@ -187,13 +187,20 @@ async function enterQueue() {
   trackListener(assignRef, async (snap) => {
     const val = snap.val();
     if (val?.roomId) {
-      dlog(`matchAssignment received! roomId=${val.roomId.slice(0, 8)} — entering room`);
-      await remove(assignRef);
-      const roomSnap = await get(ref(db, `rooms/${val.roomId}`));
-      if (roomSnap.exists()) {
-        enterRoom(val.roomId, roomSnap.val());
-      } else {
-        dlog(`WARNING: matchAssignment pointed to roomId=${val.roomId.slice(0, 8)} but room doesn't exist / can't be read`);
+      dlog(`[MATCH] matchAssignment received, roomId=${val.roomId.slice(0, 8)}`);
+      try {
+        await remove(assignRef);
+        dlog(`[MATCH] matchAssignments/${uid.slice(0,6)} cleared`);
+        const roomSnap = await get(ref(db, `rooms/${val.roomId}`));
+        if (roomSnap.exists()) {
+          dlog(`[MATCH] room doc read OK, calling enterRoom`);
+          await enterRoom(val.roomId, roomSnap.val());
+        } else {
+          dlog(`[MATCH] WARNING: roomId=${val.roomId.slice(0, 8)} does not exist or is unreadable`);
+        }
+      } catch (err) {
+        dlog(`[MATCH] ERROR: ${err?.name} | ${err?.code} | ${err?.message}`);
+        console.error("[MATCH] matchAssignment handling failed", err);
       }
     }
   });
@@ -250,19 +257,20 @@ async function checkQueueForMatch() {
       return cleaned;
     });
   } catch (err) {
-    dlog(`checkQueueForMatch TRANSACTION ERROR: ${err?.name} | ${err?.code} | ${err?.message}`);
+    dlog(`[TRANSACTION] ERROR: ${err?.name} | ${err?.code} | ${err?.message}`);
+    console.error("[TRANSACTION] failed", err, err?.stack);
     return;
   }
 
-  if (prunedUids.length) dlog(`pruned ${prunedUids.length} ghost entr${prunedUids.length === 1 ? "y" : "ies"}: ${prunedUids.map((u) => u.slice(0, 6)).join(", ")}`);
-  dlog(`checkQueueForMatch: saw ${sawEntries} in queue, paired=${pair ? pair.map((p) => p.slice(0, 6)).join("+") : "no"}`);
+  if (prunedUids.length) dlog(`[QUEUE] pruned ${prunedUids.length} ghost entr${prunedUids.length === 1 ? "y" : "ies"}: ${prunedUids.map((u) => u.slice(0, 6)).join(", ")}`);
+  dlog(`[TRANSACTION] saw ${sawEntries} in queue, paired=${pair ? pair.map((p) => p.slice(0, 6)).join("+") : "no"}`);
 
   if (!pair) return;
   await createRoomForPair(pair[0], pair[1]);
 }
 
 async function createRoomForPair(idA, idB) {
-  dlog(`createRoomForPair: pairing ${idA.slice(0, 6)} + ${idB.slice(0, 6)}`);
+  dlog(`[PAIR] createRoomForPair: pairing ${idA.slice(0, 6)} + ${idB.slice(0, 6)}`);
   try {
     const roomRef = push(ref(db, "rooms"));
     const roomId = roomRef.key;
@@ -274,7 +282,7 @@ async function createRoomForPair(idA, idB) {
       createdAt: serverTimestamp(),
     };
     await set(roomRef, roomData);
-    dlog(`room ${roomId.slice(0, 8)} created OK`);
+    dlog(`[ROOM] room ${roomId.slice(0, 8)} created OK`);
     // NOTE: we deliberately do NOT touch sessions/{idA} or sessions/{idB} here —
     // whichever client happens to run this pairing check might be neither A nor
     // B (it paired two OTHER waiting users), and the security rules only allow
@@ -283,9 +291,10 @@ async function createRoomForPair(idA, idB) {
     // assignment.
     await set(ref(db, `matchAssignments/${idA}`), { roomId });
     await set(ref(db, `matchAssignments/${idB}`), { roomId });
-    dlog(`matchAssignments written for both ${idA.slice(0, 6)} and ${idB.slice(0, 6)}`);
+    dlog(`[ROOM] matchAssignments written for both ${idA.slice(0, 6)} and ${idB.slice(0, 6)}`);
   } catch (err) {
-    dlog(`createRoomForPair ERROR: ${err?.name} | ${err?.code} | ${err?.message}`);
+    dlog(`[ROOM] ERROR: ${err?.name} | ${err?.code} | ${err?.message}`);
+    console.error("[ROOM] createRoomForPair failed", err, err?.stack);
   }
 }
 
@@ -308,43 +317,60 @@ async function leaveQueue() {
 
 // ---------------- room / chat ----------------
 async function enterRoom(roomId, room) {
-  dlog(`enterRoom: roomId=${roomId.slice(0, 8)}`);
-  State.inQueue = false;
-  clearInterval(State.queuePoll);
-  State.queuePoll = null;
-  clearListeners();
+  dlog(`[ENTER ROOM] start roomId=${roomId.slice(0, 8)}`);
+  try {
+    State.inQueue = false;
+    clearInterval(State.queuePoll);
+    State.queuePoll = null;
+    clearListeners();
+    dlog("[ENTER ROOM] listeners cleared");
 
-  const partnerId = room.userA === State.uid ? room.userB : room.userA;
-  const partnerSnap = await get(ref(db, `sessions/${partnerId}/displayId`));
+    const partnerId = room.userA === State.uid ? room.userB : room.userA;
+    dlog(`[ENTER ROOM] partnerId=${partnerId.slice(0, 8)}, fetching partner displayId`);
+    const partnerSnap = await get(ref(db, `sessions/${partnerId}/displayId`));
+    dlog(`[ENTER ROOM] partner displayId fetched: ${partnerSnap.val()}`);
 
-  State.room = { id: roomId, token: room.token, partnerId };
-  $("#partnerId").textContent = partnerSnap.val() || "Anonymous";
-  $("#chatStatusLine").textContent = "Partner connected";
-  $("#chatBody").innerHTML = `<div class="system-msg">You're now chatting with a stranger. Say hi 👋</div>`;
-  Moderation.resetFloodWindow();
-  await update(ref(db, `sessions/${State.uid}`), { status: "matched" });
+    State.room = { id: roomId, token: room.token, partnerId };
+    $("#partnerId").textContent = partnerSnap.val() || "Anonymous";
+    $("#chatStatusLine").textContent = "Partner connected";
+    $("#chatBody").innerHTML = `<div class="system-msg">You're now chatting with a stranger. Say hi 👋</div>`;
+    Moderation.resetFloodWindow();
 
-  showScreen("screen-chat");
+    await update(ref(db, `sessions/${State.uid}`), { status: "matched" });
+    dlog("[ENTER ROOM] own session status set to matched");
 
-  // If the tab dies mid-chat, mark the room closed so the partner is told.
-  State.roomDisconnectRef = ref(db, `rooms/${roomId}`);
-  onDisconnect(State.roomDisconnectRef).update({
-    status: "closed", closedAt: serverTimestamp(), closedBy: State.uid, closeReason: "disconnect",
-  });
+    showScreen("screen-chat");
+    dlog("[ENTER ROOM] showScreen(screen-chat) called — UI should now show chat");
 
-  trackListener(ref(db, `messages/${roomId}`), (snap) => renderIncomingMessage(snap.val()), "child_added");
+    // If the tab dies mid-chat, mark the room closed so the partner is told.
+    State.roomDisconnectRef = ref(db, `rooms/${roomId}`);
+    onDisconnect(State.roomDisconnectRef).update({
+      status: "closed", closedAt: serverTimestamp(), closedBy: State.uid, closeReason: "disconnect",
+    }).catch((e) => dlog(`[ENTER ROOM] onDisconnect registration failed: ${e?.message}`));
 
-  trackListener(ref(db, `rooms/${roomId}`), (snap) => {
-    const val = snap.val();
-    if (val && val.status === "closed" && val.closedBy !== State.uid && State.room?.id === roomId) {
-      handlePartnerLeft(val.closeReason);
-    }
-  });
+    trackListener(ref(db, `messages/${roomId}`), (snap) => renderIncomingMessage(snap.val()), "child_added");
 
-  trackListener(ref(db, `typing/${roomId}/${partnerId}`), (snap) => {
-    const ts = snap.val();
-    if (ts && Date.now() - ts < 2500) showTyping();
-  });
+    trackListener(ref(db, `rooms/${roomId}`), (snap) => {
+      const val = snap.val();
+      if (val && val.status === "closed" && val.closedBy !== State.uid && State.room?.id === roomId) {
+        handlePartnerLeft(val.closeReason);
+      }
+    });
+
+    trackListener(ref(db, `typing/${roomId}/${partnerId}`), (snap) => {
+      const ts = snap.val();
+      if (ts && Date.now() - ts < 2500) showTyping();
+    });
+
+    dlog("[ENTER ROOM] complete — chat listeners attached");
+  } catch (err) {
+    dlog(`[ENTER ROOM] FATAL ERROR: ${err?.name} | ${err?.code} | ${err?.message}`);
+    console.error("[ENTER ROOM] failed", err, err?.stack);
+    toast(`Failed to enter room: ${err?.message || err}`, "danger");
+    // Don't leave the user stranded on "Searching partner..." with a room
+    // that's dead to them — send them back to try again.
+    showScreen("screen-landing");
+  }
 }
 
 function renderIncomingMessage(msg) {
@@ -413,11 +439,16 @@ $("#chatForm")?.addEventListener("submit", async (e) => {
   if (!Moderation.containsSensitiveWord(text)) {
     input.value = "";
     appendBubble(text, "me");
-    await push(ref(db, `messages/${State.room.id}`), {
-      senderId: State.uid,
-      content: text,
-      createdAt: Date.now(),
-    });
+    try {
+      await push(ref(db, `messages/${State.room.id}`), {
+        senderId: State.uid,
+        content: text,
+        createdAt: Date.now(),
+      });
+    } catch (err) {
+      dlog(`[CHAT] send ERROR: ${err?.name} | ${err?.code} | ${err?.message}`);
+      toast("Message failed to send.", "danger");
+    }
     return;
   }
 
@@ -600,16 +631,16 @@ setInterval(() => {
 // completely silently. This is a diagnostic net, not normal-path behavior.
 window.addEventListener("unhandledrejection", (event) => {
   const reason = event.reason;
-  // Only surface errors that actually look like they came from our Firebase
-  // calls — random browser/extension noise also fires unhandledrejection
-  // and would otherwise show up as false alarms here.
-  const looksLikeFirebase = reason?.name === "FirebaseError" || /firebase/i.test(reason?.stack || "");
-  if (!looksLikeFirebase) {
-    console.warn("Ignored unrelated unhandled rejection:", reason);
-    return;
-  }
   const parts = [reason?.name, reason?.code, reason?.message].filter(Boolean);
   const detail = parts.length ? parts.join(" | ") : String(reason);
-  console.error("Unhandled rejection:", reason);
-  toast(`Unexpected error: ${detail}`, "danger");
+  // Always record it in the persistent log, even if we suppress the toast —
+  // an earlier version of this filter silently dropped some real Firebase
+  // errors whose stack didn't literally contain the word "firebase".
+  dlog(`[UNHANDLED] ${detail}`);
+  console.error("Unhandled rejection:", reason, reason?.stack);
+
+  const looksLikeFirebase = reason?.name === "FirebaseError" || /firebase/i.test(reason?.stack || "") || /firebase/i.test(detail);
+  if (looksLikeFirebase) {
+    toast(`Unexpected error: ${detail}`, "danger");
+  }
 });
