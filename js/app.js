@@ -27,6 +27,8 @@ const State = {
   queuePoll: null,
   inQueue: false,
   roomDisconnectRef: null,
+  partnerLeftHandled: false,
+  consentGiven: false,
 };
 
 // ---------------- helpers ----------------
@@ -43,6 +45,23 @@ function randomId(prefix) {
   let s = "";
   for (let i = 0; i < 6; i++) s += chars[Math.floor(Math.random() * chars.length)];
   return `${prefix}-${s}`;
+}
+
+// Cryptographically strong Room ID: 20 chars from [A-Za-z0-9], generated via
+// crypto.getRandomValues() with rejection sampling (no modulo bias). This is
+// the actual Firebase key for the room AND the public URL segment
+// (/r/{ROOM_ID}) — no UUID, no timestamp, no incrementing counter.
+function generateRoomId(length = 20) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const alphabetLen = alphabet.length; // 62
+  const maxValid = Math.floor(256 / alphabetLen) * alphabetLen; // reject bytes >= this
+  const buf = new Uint8Array(1);
+  let id = "";
+  while (id.length < length) {
+    crypto.getRandomValues(buf);
+    if (buf[0] < maxValid) id += alphabet[buf[0] % alphabetLen];
+  }
+  return id;
 }
 
 function toast(message, kind = "") {
@@ -141,6 +160,17 @@ $all(".consent-box").forEach((box) => {
 
 $("#btnConsentContinue")?.addEventListener("click", async () => {
   dlog("[UI] btnConsentContinue clicked");
+  State.consentGiven = true;
+  await beginMatching();
+});
+
+$("#btnFindNewPartner")?.addEventListener("click", async () => {
+  dlog("[UI] btnFindNewPartner clicked");
+  if (!State.consentGiven) { showScreen("screen-consent"); return; }
+  await beginMatching();
+});
+
+async function beginMatching() {
   showScreen("screen-queue");
   try {
     const uid = await ensureSession();
@@ -150,6 +180,14 @@ $("#btnConsentContinue")?.addEventListener("click", async () => {
     if (ban && ban.bannedUntil && ban.bannedUntil > Date.now()) {
       const until = new Date(ban.bannedUntil).toLocaleTimeString();
       toast(`You're temporarily restricted until ${until}.`, "danger");
+      showScreen("screen-landing");
+      return;
+    }
+
+    const limited = await checkRateLimit(uid);
+    if (limited) {
+      dlog("[RATE LIMIT] blocked: too many attempts in the last minute");
+      toast("Terlalu banyak percobaan berturut-turut. Coba lagi sebentar lagi.", "danger");
       showScreen("screen-landing");
       return;
     }
@@ -164,7 +202,32 @@ $("#btnConsentContinue")?.addEventListener("click", async () => {
     toast(`Session error${label}: ${detail}`, "danger");
     showScreen("screen-landing");
   }
-});
+}
+
+// Lightweight abuse deterrent: more than 8 "start matching" attempts within
+// 60s from the same uid gets briefly blocked. This is enforced via a
+// Firebase transaction (so it's shared/consistent across tabs/reloads for
+// the same uid) rather than an in-memory counter, which would reset on
+// every reload and be trivial to bypass.
+async function checkRateLimit(uid) {
+  const WINDOW_MS = 60000;
+  const MAX_ATTEMPTS = 8;
+  try {
+    const result = await runTransaction(ref(db, `rateLimits/${uid}`), (current) => {
+      const now = Date.now();
+      if (!current || now - (current.windowStart || 0) > WINDOW_MS) {
+        return { windowStart: now, count: 1 };
+      }
+      current.count = (current.count || 0) + 1;
+      return current;
+    });
+    const val = result.snapshot.val();
+    return !!(val && val.count > MAX_ATTEMPTS);
+  } catch (err) {
+    dlog(`[RATE LIMIT] check failed (allowing through): ${err?.message}`);
+    return false; // never block someone because the rate limiter itself broke
+  }
+}
 
 // ---------------- queue (FIFO) / matching ----------------
 async function enterQueue() {
@@ -273,17 +336,23 @@ async function checkQueueForMatch() {
 async function createRoomForPair(idA, idB) {
   dlog(`[PAIR] createRoomForPair: pairing ${idA.slice(0, 6)} + ${idB.slice(0, 6)}`);
   try {
-    const roomRef = push(ref(db, "rooms"));
-    const roomId = roomRef.key;
+    // Astronomically unlikely to collide (62^20 keyspace), but check anyway
+    // and retry a couple of times rather than trust blind luck.
+    let roomId = generateRoomId();
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const existsSnap = await get(ref(db, `rooms/${roomId}`));
+      if (!existsSnap.exists()) break;
+      roomId = generateRoomId();
+    }
+
     const roomData = {
-      token: `room_${roomId.slice(0, 7).toLowerCase()}`,
       userA: idA,
       userB: idB,
       status: "active",
       createdAt: serverTimestamp(),
     };
-    await set(roomRef, roomData);
-    dlog(`[ROOM] room ${roomId.slice(0, 8)} created OK`);
+    await set(ref(db, `rooms/${roomId}`), roomData);
+    dlog(`[ROOM] room ${roomId} created OK`);
     // NOTE: we deliberately do NOT touch sessions/{idA} or sessions/{idB} here —
     // whichever client happens to run this pairing check might be neither A nor
     // B (it paired two OTHER waiting users), and the security rules only allow
@@ -318,9 +387,10 @@ async function leaveQueue() {
 
 // ---------------- room / chat ----------------
 async function enterRoom(roomId, room) {
-  dlog(`[ENTER ROOM] start roomId=${roomId.slice(0, 8)}`);
+  dlog(`[ENTER ROOM] start roomId=${roomId}`);
   try {
     State.inQueue = false;
+    State.partnerLeftHandled = false;
     clearInterval(State.queuePoll);
     State.queuePoll = null;
     clearListeners();
@@ -331,7 +401,7 @@ async function enterRoom(roomId, room) {
     const partnerSnap = await get(ref(db, `sessions/${partnerId}/displayId`));
     dlog(`[ENTER ROOM] partner displayId fetched: ${partnerSnap.val()}`);
 
-    State.room = { id: roomId, token: room.token, partnerId };
+    State.room = { id: roomId, partnerId };
     $("#partnerId").textContent = partnerSnap.val() || "Anonymous";
     $("#chatStatusLine").textContent = "Partner connected";
     $("#chatBody").innerHTML = `<div class="system-msg">You're now chatting with a stranger. Say hi 👋</div>`;
@@ -340,22 +410,49 @@ async function enterRoom(roomId, room) {
     await update(ref(db, `sessions/${State.uid}`), { status: "matched" });
     dlog("[ENTER ROOM] own session status set to matched");
 
+    // Shareable/resumable URL — the room stays reachable at this URL for as
+    // long as it's active, so a reload doesn't lose the chat.
+    history.pushState({ roomId }, "", `/r/${roomId}`);
+
     showScreen("screen-chat");
     dlog("[ENTER ROOM] showScreen(screen-chat) called — UI should now show chat");
 
-    // If the tab dies mid-chat, mark the room closed so the partner is told.
-    State.roomDisconnectRef = ref(db, `rooms/${roomId}`);
-    onDisconnect(State.roomDisconnectRef).update({
-      status: "closed", closedAt: serverTimestamp(), closedBy: State.uid, closeReason: "disconnect",
-    }).catch((e) => dlog(`[ENTER ROOM] onDisconnect registration failed: ${e?.message}`));
+    // NOTE: room lifecycle is intentionally decoupled from connection blips.
+    // A brief disconnect (screen lock, tab backgrounded, flaky network) only
+    // toggles the "Partner keluar." / "Partner kembali online." indicator
+    // below — it does NOT end the room. The room only ends via an explicit
+    // "Akhiri Chat" click (leaveRoom) or a moderation violation.
 
     trackListener(ref(db, `messages/${roomId}`), (snap) => renderIncomingMessage(snap.val()), "child_added");
 
+    // Room lifecycle listener: only reacts to an explicit end (status
+    // "ended") or the room being deleted entirely (admin action / cleanup).
     trackListener(ref(db, `rooms/${roomId}`), (snap) => {
       const val = snap.val();
-      if (val && val.status === "closed" && val.closedBy !== State.uid && State.room?.id === roomId) {
+      if (!val && State.room?.id === roomId) {
+        handlePartnerLeft("deleted");
+        return;
+      }
+      if (val && val.status === "ended" && val.closedBy !== State.uid && State.room?.id === roomId) {
         handlePartnerLeft(val.closeReason);
       }
+    });
+
+    // Partner presence: shows "Partner keluar." / "Partner kembali online."
+    // without ever touching the room itself.
+    let firstPresenceSnapshot = true;
+    let partnerWasOnline = true;
+    trackListener(ref(db, `presence/${partnerId}`), (snap) => {
+      const isOnline = snap.exists();
+      if (firstPresenceSnapshot) { firstPresenceSnapshot = false; partnerWasOnline = isOnline; return; }
+      if (isOnline === partnerWasOnline) return;
+      partnerWasOnline = isOnline;
+      $("#chatStatusLine").textContent = isOnline ? "Partner connected" : "Partner keluar.";
+      const el = document.createElement("div");
+      el.className = "system-msg";
+      el.textContent = isOnline ? "Partner kembali online." : "Partner keluar.";
+      $("#chatBody").appendChild(el);
+      $("#chatBody").scrollTop = $("#chatBody").scrollHeight;
     });
 
     trackListener(ref(db, `typing/${roomId}/${partnerId}`), (snap) => {
@@ -403,6 +500,13 @@ function showTyping() {
 }
 
 function handlePartnerLeft(reason) {
+  if (State.partnerLeftHandled) {
+    dlog(`[CHAT] handlePartnerLeft(${reason}) ignored — already handled`);
+    return;
+  }
+  State.partnerLeftHandled = true;
+  dlog(`[CHAT] handlePartnerLeft(${reason}) — will show Room Ended screen`);
+
   $("#chatStatusLine").textContent = "Partner disconnected";
   const body = $("#chatBody");
   const el = document.createElement("div");
@@ -411,22 +515,28 @@ function handlePartnerLeft(reason) {
     ? "Stranger clicked Next and left the chat."
     : reason === "violation"
       ? "Chat ended — the other user violated the rules."
-      : "Stranger has disconnected.";
+      : reason === "deleted"
+        ? "This room was removed."
+        : "Stranger has disconnected.";
   body.appendChild(el);
   body.scrollTop = body.scrollHeight;
 
-  // Don't leave the other person staring at a dead chat — show why, then
-  // clean up and send them back out shortly after.
+  // Show why for a moment, then present the explicit "Room telah berakhir"
+  // screen rather than silently bouncing back to landing.
   setTimeout(async () => {
-    if (State.room) {
+    try {
+      clearInterval(State.queuePoll);
+      State.queuePoll = null;
+      State.inQueue = false;
       clearListeners();
-      if (State.roomDisconnectRef) {
-        await onDisconnect(State.roomDisconnectRef).cancel().catch(() => {});
-        State.roomDisconnectRef = null;
-      }
       State.room = null;
       await update(ref(db, `sessions/${State.uid}`), { status: "idle" }).catch(() => {});
-      showScreen("screen-landing");
+      history.pushState({}, "", "/");
+      dlog("[CHAT] partner-left cleanup done, showing Room Ended screen");
+      showScreen("screen-room-ended");
+    } catch (err) {
+      dlog(`[CHAT] partner-left cleanup ERROR: ${err?.name} | ${err?.code} | ${err?.message}`);
+      showScreen("screen-room-ended");
     }
   }, 1400);
 }
@@ -537,34 +647,36 @@ $("#chatInput")?.addEventListener("input", () => {
 
 // ---------------- next / disconnect ----------------
 async function leaveRoom(reason) {
+  dlog(`[CHAT] leaveRoom(${reason}) called, roomId=${State.room?.id || "none"}`);
   clearListeners();
-  if (State.roomDisconnectRef) {
-    await onDisconnect(State.roomDisconnectRef).cancel().catch(() => {});
-    State.roomDisconnectRef = null;
-  }
   if (State.room) {
     try {
       const roomRef = ref(db, `rooms/${State.room.id}`);
       const snap = await get(roomRef);
       const current = snap.val();
-      if (current && current.status === "closed") {
+      if (current && current.status === "ended") {
         // partner already left first — safe to fully clean up now
+        dlog("[CHAT] room already ended by partner — deleting room fully");
         await remove(roomRef);
         await remove(ref(db, `messages/${State.room.id}`));
         await remove(ref(db, `typing/${State.room.id}`));
       } else {
+        dlog(`[CHAT] marking room ended (closedBy=${State.uid.slice(0,6)}, reason=${reason})`);
         await update(roomRef, {
-          status: "closed", closedAt: serverTimestamp(), closedBy: State.uid, closeReason: reason,
+          status: "ended", closedAt: serverTimestamp(), closedBy: State.uid, closeReason: reason,
         });
         await remove(ref(db, `typing/${State.room.id}/${State.uid}`));
       }
+      dlog("[CHAT] leaveRoom cleanup OK");
     } catch (err) {
       // Cleanup failing (e.g. rules not yet deployed) must never trap the
       // user in the chat screen — log it and move on regardless.
+      dlog(`[CHAT] leaveRoom cleanup ERROR: ${err?.name} | ${err?.code} | ${err?.message}`);
       console.error("leaveRoom cleanup error", err);
     }
   }
   State.room = null;
+  history.pushState({}, "", "/");
 }
 
 // ---------------- confirm modal (used by Next / Disconnect) ----------------
@@ -648,6 +760,31 @@ $("#btnSubmitReport")?.addEventListener("click", async () => {
   $("#reportModal").hidden = true;
   toast("Report submitted. Thank you for keeping XRZ safe.", "success");
 });
+
+// ---------------- resume from shared URL (/r/{roomId}) ----------------
+async function tryResumeFromUrl() {
+  const match = location.pathname.match(/^\/r\/([A-Za-z0-9]{16,24})$/);
+  if (!match) return;
+  const roomId = match[1];
+  dlog(`[URL] detected room link roomId=${roomId}`);
+  try {
+    const uid = await ensureSession();
+    const roomSnap = await get(ref(db, `rooms/${roomId}`));
+    const room = roomSnap.val();
+    if (!room || (room.userA !== uid && room.userB !== uid) || room.status !== "active") {
+      dlog("[URL] room not resumable (missing, not yours, or already ended)");
+      history.replaceState({}, "", "/");
+      showScreen("screen-room-ended");
+      return;
+    }
+    dlog("[URL] resuming room");
+    await enterRoom(roomId, room);
+  } catch (err) {
+    dlog(`[URL] resume ERROR: ${err?.name} | ${err?.message}`);
+    history.replaceState({}, "", "/");
+  }
+}
+tryResumeFromUrl();
 
 // ---------------- online counter (Firebase presence) ----------------
 async function initOnlineCounter() {
