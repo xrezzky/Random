@@ -230,7 +230,14 @@ input, textarea { font-family: inherit; }
 /* ============================================================
    Chat
    ============================================================ */
-.chat-shell { max-width: 720px; margin: 0 auto; display: flex; flex-direction: column; height: 640px; overflow: hidden; }
+.chat-shell { max-width: 720px; margin: 0 auto; display: flex; flex-direction: column; height: 640px; overflow: hidden; position: relative; }
+.chat-body-wrap { position: relative; flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.chat-body-wrap::after {
+  content: "";
+  position: absolute; left: 0; right: 0; bottom: 0; height: 44px;
+  background: linear-gradient(to bottom, rgba(17,24,39,0), var(--card) 92%);
+  pointer-events: none;
+}
 
 .chat-header {
   display: flex; align-items: center; justify-content: space-between;
