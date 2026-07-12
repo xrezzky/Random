@@ -85,10 +85,10 @@ async function ensureSession() {
 
   const presenceRef = ref(db, `presence/${uid}`);
   await set(presenceRef, { displayId: State.displayId, at: serverTimestamp() });
-  onDisconnect(presenceRef).remove();
-  onDisconnect(ref(db, `sessions/${uid}/status`)).set("idle");
+  onDisconnect(presenceRef).remove().catch((e) => console.error("onDisconnect presence failed", e));
+  onDisconnect(ref(db, `sessions/${uid}/status`)).set("idle").catch((e) => console.error("onDisconnect status failed", e));
   // if the tab dies while queued, don't leave a ghost entry blocking FIFO
-  onDisconnect(ref(db, `queue/${uid}`)).remove();
+  onDisconnect(ref(db, `queue/${uid}`)).remove().catch((e) => console.error("onDisconnect queue failed", e));
 
   setStatusOnline(true);
   return uid;
@@ -127,7 +127,8 @@ $("#btnConsentContinue")?.addEventListener("click", async () => {
     await enterQueue();
   } catch (err) {
     console.error(err);
-    toast(`Session error: ${err?.message || err}`, "danger");
+    const detail = err?.code || err?.message || err?.name || JSON.stringify(err) || String(err);
+    toast(`Session error: ${detail}`, "danger");
     showScreen("screen-landing");
   }
 });
@@ -551,3 +552,13 @@ initOnlineCounter();
 setInterval(() => {
   if (State.uid) update(ref(db, `sessions/${State.uid}`), { lastSeenAt: serverTimestamp() });
 }, 20000);
+
+// Surfaces any promise rejection that wasn't explicitly caught anywhere else
+// (e.g. a Firebase write failing on a fire-and-forget call) so nothing fails
+// completely silently. This is a diagnostic net, not normal-path behavior.
+window.addEventListener("unhandledrejection", (event) => {
+  const reason = event.reason;
+  const detail = reason?.code || reason?.message || reason?.name || String(reason);
+  console.error("Unhandled rejection:", reason);
+  toast(`Unexpected error: ${detail}`, "danger");
+});
