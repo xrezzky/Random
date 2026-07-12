@@ -1,6 +1,9 @@
 {
   "version": 2,
   "outputDirectory": "public",
+  "rewrites": [
+    { "source": "/r/:roomId", "destination": "/index.html" }
+  ],
   "headers": [
     {
       "source": "/js/(.*)",
@@ -22,6 +25,12 @@
     },
     {
       "source": "/",
+      "headers": [
+        { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
+      ]
+    },
+    {
+      "source": "/r/(.*)",
       "headers": [
         { "key": "Cache-Control", "value": "no-cache, no-store, must-revalidate" }
       ]

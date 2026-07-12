@@ -6,7 +6,7 @@
 <title>XRZ — Anonymous Random Chat</title>
 <meta name="description" content="Meet random people instantly. No account required. Just chat." />
 <link rel="icon" href="icons/favicon.svg" type="image/svg+xml" />
-<link rel="stylesheet" href="css/style.css?v=16" />
+<link rel="stylesheet" href="css/style.css?v=18" />
 </head>
 <body>
 
@@ -23,7 +23,7 @@
     <div class="topbar-status" id="topbarStatus">
       <span class="dot dot-off" id="statusDot"></span>
       <span id="statusText">Offline</span>
-      <span style="color:var(--text-2);opacity:.5;margin-left:8px;">v16</span>
+      <span style="color:var(--text-2);opacity:.5;margin-left:8px;">v18</span>
     </div>
   </div>
 </header>
@@ -140,6 +140,15 @@
     </div>
   </section>
 
+  <!-- ============ SCREEN: ROOM ENDED ============ -->
+  <section class="screen" id="screen-room-ended">
+    <div class="panel-card center">
+      <h2>Room telah berakhir.</h2>
+      <p class="muted">Link ini sudah tidak berlaku.</p>
+      <button class="btn btn-primary" id="btnFindNewPartner">Cari Partner Baru</button>
+    </div>
+  </section>
+
 </main>
 
 <details id="debugPanel" style="max-width:560px;margin:0 auto 40px;padding:0 20px;">
@@ -184,6 +193,6 @@
 <!-- ============ TOASTS ============ -->
 <div class="toast-stack" id="toastStack"></div>
 
-<script type="module" src="js/app.js?v=16"></script>
+<script type="module" src="js/app.js?v=18"></script>
 </body>
 </html>

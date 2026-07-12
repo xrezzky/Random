@@ -55,6 +55,13 @@
 
     <h3 class="section-title">Strikes</h3>
     <table id="strikesTable"><thead><tr><th>Session</th><th>Strike Count</th></tr></thead><tbody></tbody></table>
+
+    <h3 class="section-title">Delete a Room</h3>
+    <p class="muted">Paste a Room ID to forcibly end it. The users will see "Room telah berakhir." immediately.</p>
+    <div style="display:flex;gap:10px;max-width:480px;">
+      <input type="text" id="deleteRoomIdInput" placeholder="Room ID (e.g. Z8vKmQ4LpX9RwT2F)" style="flex:1;padding:12px;background:#0F1729;border:2.5px solid var(--border);border-radius:10px;color:white;" />
+      <button class="btn btn-danger" id="btnDeleteRoom">Delete</button>
+    </div>
   </div>
 </main>
 
@@ -73,6 +80,27 @@
   });
 
   function esc(s) { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML; }
+
+  document.getElementById("btnDeleteRoom").addEventListener("click", async () => {
+    const roomId = document.getElementById("deleteRoomIdInput").value.trim();
+    if (!roomId) return;
+    try {
+      const res = await fetch("/api/admin-delete-room", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-admin-password": adminPassword },
+        body: JSON.stringify({ roomId }),
+      });
+      const body = await res.json();
+      if (res.ok) {
+        document.getElementById("deleteRoomIdInput").value = "";
+        alert("Room deleted.");
+      } else {
+        alert(body.error || "Failed to delete room.");
+      }
+    } catch (err) {
+      alert("Network error deleting room.");
+    }
+  });
 
   async function loadAll() {
     const errEl = document.getElementById("gateError");
