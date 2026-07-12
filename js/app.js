@@ -11,6 +11,7 @@
 // else's check paired you up.
 // ============================================================
 import { db, auth, authReady } from "./firebase-client.js";
+import { Moderation } from "./moderation.js";
 import {
   ref, push, set, update, remove, get, onValue, onChildAdded, off,
   runTransaction, onDisconnect, serverTimestamp, query, limitToLast,

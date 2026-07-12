@@ -122,3 +122,5 @@ const Moderation = (() => {
 
   return { localCheck, remoteCheck, resetFloodWindow, containsSensitiveWord };
 })();
+
+export { Moderation };
