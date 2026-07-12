@@ -53,6 +53,20 @@ function toast(message, kind = "") {
   setTimeout(() => el.remove(), 4200);
 }
 
+// Persistent on-screen log (toasts disappear too fast to screenshot
+// reliably). Appears under the queue screen; survives until the tab closes.
+function dlog(msg) {
+  console.log("[XRZ]", msg);
+  const el = $("#debugLog");
+  if (!el) return;
+  const time = new Date().toLocaleTimeString([], { hour12: false });
+  const line = document.createElement("div");
+  line.textContent = `${time}  ${msg}`;
+  el.appendChild(line);
+  el.scrollTop = el.scrollHeight;
+  while (el.children.length > 40) el.removeChild(el.firstChild);
+}
+
 function setStatusOnline(on) {
   $("#statusDot").className = `dot ${on ? "dot-on" : "dot-off"}`;
   $("#statusText").textContent = on ? "Online" : "Offline";
@@ -86,6 +100,7 @@ async function ensureSession() {
   const uid = auth.currentUser.uid;
   State.uid = uid;
   State.displayId = randomId("Guest");
+  dlog(`ensureSession: uid=${uid.slice(0, 8)} displayId=${State.displayId}`);
 
   await step("sessions-write", () => set(ref(db, `sessions/${uid}`), {
     displayId: State.displayId,
@@ -93,9 +108,11 @@ async function ensureSession() {
     createdAt: serverTimestamp(),
     lastSeenAt: serverTimestamp(),
   }));
+  dlog("sessions-write OK");
 
   const presenceRef = ref(db, `presence/${uid}`);
   await step("presence-write", () => set(presenceRef, { displayId: State.displayId, at: serverTimestamp() }));
+  dlog("presence-write OK");
   onDisconnect(presenceRef).remove().catch((e) => console.error("onDisconnect presence failed", e));
   onDisconnect(ref(db, `sessions/${uid}/status`)).set("idle").catch((e) => console.error("onDisconnect status failed", e));
   // if the tab dies while queued, don't leave a ghost entry blocking FIFO
@@ -122,6 +139,7 @@ $all(".consent-box").forEach((box) => {
 });
 
 $("#btnConsentContinue")?.addEventListener("click", async () => {
+  dlog("btnConsentContinue clicked");
   showScreen("screen-queue");
   try {
     const uid = await ensureSession();
@@ -141,6 +159,7 @@ $("#btnConsentContinue")?.addEventListener("click", async () => {
     const parts = [err?.name, err?.code, err?.message].filter(Boolean);
     const detail = parts.length ? parts.join(" | ") : String(err);
     const label = err?.stepLabel ? ` [${err.stepLabel}]` : "";
+    dlog(`ERROR${label}: ${detail}`);
     toast(`Session error${label}: ${detail}`, "danger");
     showScreen("screen-landing");
   }
@@ -155,6 +174,7 @@ async function enterQueue() {
   State.inQueue = true;
   await step("session-status-queued", () => update(ref(db, `sessions/${uid}`), { status: "queued" }));
   await step("queue-write", () => set(ref(db, `queue/${uid}`), { joinedAt: Date.now(), displayId: State.displayId }));
+  dlog(`queue-write OK, joined queue as ${uid.slice(0, 8)}`);
 
   trackListener(ref(db, "queue"), (snap) => {
     const n = snap.exists() ? Object.keys(snap.val()).length : 0;
@@ -169,6 +189,7 @@ async function enterQueue() {
   trackListener(ref(db, `queue/${uid}`), (snap) => {
     if (firstQueueSnapshot) { firstQueueSnapshot = false; return; }
     if (!snap.exists() && State.inQueue) {
+      dlog("self-heal: our queue entry vanished while still waiting — rejoining");
       set(ref(db, `queue/${uid}`), { joinedAt: Date.now(), displayId: State.displayId })
         .catch((e) => console.error("self-heal queue rejoin failed", e));
     }
@@ -180,9 +201,14 @@ async function enterQueue() {
   trackListener(assignRef, async (snap) => {
     const val = snap.val();
     if (val?.roomId) {
+      dlog(`matchAssignment received! roomId=${val.roomId.slice(0, 8)} — entering room`);
       await remove(assignRef);
       const roomSnap = await get(ref(db, `rooms/${val.roomId}`));
-      if (roomSnap.exists()) enterRoom(val.roomId, roomSnap.val());
+      if (roomSnap.exists()) {
+        enterRoom(val.roomId, roomSnap.val());
+      } else {
+        dlog(`WARNING: matchAssignment pointed to roomId=${val.roomId.slice(0, 8)} but room doesn't exist / can't be read`);
+      }
     }
   });
 
@@ -199,19 +225,28 @@ async function checkQueueForMatch() {
   await pruneStaleQueueEntries();
 
   let pair = null;
+  let sawEntries = 0;
 
-  await runTransaction(ref(db, "queue"), (current) => {
-    if (!current) return; // nobody waiting — abort, no write
-    const entries = Object.entries(current).sort((a, b) => (a[1].joinedAt || 0) - (b[1].joinedAt || 0));
-    if (entries.length < 2) return; // fewer than 2 waiting — abort, no write
+  try {
+    await runTransaction(ref(db, "queue"), (current) => {
+      if (!current) { sawEntries = 0; return; }
+      const entries = Object.entries(current).sort((a, b) => (a[1].joinedAt || 0) - (b[1].joinedAt || 0));
+      sawEntries = entries.length;
+      if (entries.length < 2) return; // fewer than 2 waiting — abort, no write
 
-    const [idA] = entries[0];
-    const [idB] = entries[1];
-    pair = [idA, idB];
-    delete current[idA];
-    delete current[idB];
-    return current;
-  });
+      const [idA] = entries[0];
+      const [idB] = entries[1];
+      pair = [idA, idB];
+      delete current[idA];
+      delete current[idB];
+      return current;
+    });
+  } catch (err) {
+    dlog(`checkQueueForMatch TRANSACTION ERROR: ${err?.name} | ${err?.code} | ${err?.message}`);
+    return;
+  }
+
+  dlog(`checkQueueForMatch: saw ${sawEntries} in queue, paired=${pair ? pair.map((p) => p.slice(0, 6)).join("+") : "no"}`);
 
   if (!pair) return;
   await createRoomForPair(pair[0], pair[1]);
@@ -238,28 +273,38 @@ async function pruneStaleQueueEntries() {
     const age = now - (entry?.joinedAt || 0);
     if (age > GRACE_MS && !presenceVal[uid]) updates[`queue/${uid}`] = null;
   }
-  if (Object.keys(updates).length) await update(ref(db), updates);
+  if (Object.keys(updates).length) {
+    dlog(`pruneStaleQueueEntries: removing ${Object.keys(updates).length} ghost entr${Object.keys(updates).length === 1 ? "y" : "ies"}: ${Object.keys(updates).join(", ")}`);
+    await update(ref(db), updates);
+  }
 }
 
 async function createRoomForPair(idA, idB) {
-  const roomRef = push(ref(db, "rooms"));
-  const roomId = roomRef.key;
-  const roomData = {
-    token: `room_${roomId.slice(0, 7).toLowerCase()}`,
-    userA: idA,
-    userB: idB,
-    status: "active",
-    createdAt: serverTimestamp(),
-  };
-  await set(roomRef, roomData);
-  // NOTE: we deliberately do NOT touch sessions/{idA} or sessions/{idB} here —
-  // whichever client happens to run this pairing check might be neither A nor
-  // B (it paired two OTHER waiting users), and the security rules only allow
-  // a user to write their own sessions/$uid node. Each client marks its own
-  // session "matched" itself, in enterRoom() below, once it receives the
-  // assignment.
-  await set(ref(db, `matchAssignments/${idA}`), { roomId });
-  await set(ref(db, `matchAssignments/${idB}`), { roomId });
+  dlog(`createRoomForPair: pairing ${idA.slice(0, 6)} + ${idB.slice(0, 6)}`);
+  try {
+    const roomRef = push(ref(db, "rooms"));
+    const roomId = roomRef.key;
+    const roomData = {
+      token: `room_${roomId.slice(0, 7).toLowerCase()}`,
+      userA: idA,
+      userB: idB,
+      status: "active",
+      createdAt: serverTimestamp(),
+    };
+    await set(roomRef, roomData);
+    dlog(`room ${roomId.slice(0, 8)} created OK`);
+    // NOTE: we deliberately do NOT touch sessions/{idA} or sessions/{idB} here —
+    // whichever client happens to run this pairing check might be neither A nor
+    // B (it paired two OTHER waiting users), and the security rules only allow
+    // a user to write their own sessions/$uid node. Each client marks its own
+    // session "matched" itself, in enterRoom() below, once it receives the
+    // assignment.
+    await set(ref(db, `matchAssignments/${idA}`), { roomId });
+    await set(ref(db, `matchAssignments/${idB}`), { roomId });
+    dlog(`matchAssignments written for both ${idA.slice(0, 6)} and ${idB.slice(0, 6)}`);
+  } catch (err) {
+    dlog(`createRoomForPair ERROR: ${err?.name} | ${err?.code} | ${err?.message}`);
+  }
 }
 
 $("#btnCancelQueue")?.addEventListener("click", async () => {
@@ -281,6 +326,7 @@ async function leaveQueue() {
 
 // ---------------- room / chat ----------------
 async function enterRoom(roomId, room) {
+  dlog(`enterRoom: roomId=${roomId.slice(0, 8)}`);
   State.inQueue = false;
   clearInterval(State.queuePoll);
   State.queuePoll = null;
@@ -572,6 +618,14 @@ setInterval(() => {
 // completely silently. This is a diagnostic net, not normal-path behavior.
 window.addEventListener("unhandledrejection", (event) => {
   const reason = event.reason;
+  // Only surface errors that actually look like they came from our Firebase
+  // calls — random browser/extension noise also fires unhandledrejection
+  // and would otherwise show up as false alarms here.
+  const looksLikeFirebase = reason?.name === "FirebaseError" || /firebase/i.test(reason?.stack || "");
+  if (!looksLikeFirebase) {
+    console.warn("Ignored unrelated unhandled rejection:", reason);
+    return;
+  }
   const parts = [reason?.name, reason?.code, reason?.message].filter(Boolean);
   const detail = parts.length ? parts.join(" | ") : String(reason);
   console.error("Unhandled rejection:", reason);
