@@ -24,6 +24,7 @@ const State = {
   listeners: [],          // [{ ref, cb, event }] for cleanup via off()
   typingSendAt: 0,
   queuePoll: null,
+  inQueue: false,
   roomDisconnectRef: null,
 };
 
@@ -137,12 +138,25 @@ async function enterQueue() {
   $("#queueSession").textContent = `session_${uid.slice(0, 7).toUpperCase()}`;
   $("#queueWait").textContent = "Estimated wait: a few seconds";
 
+  State.inQueue = true;
   await update(ref(db, `sessions/${uid}`), { status: "queued" });
   await set(ref(db, `queue/${uid}`), { joinedAt: Date.now(), displayId: State.displayId });
 
   trackListener(ref(db, "queue"), (snap) => {
     const n = snap.exists() ? Object.keys(snap.val()).length : 0;
     $("#queueWait").textContent = `${n} ${n === 1 ? "person" : "people"} in queue right now`;
+  });
+
+  // Self-heal: a brief connection drop (screen lock, app switch, network
+  // blip) triggers our own onDisconnect handler, which removes us from
+  // /queue. If that happens while we're still expecting to be waiting
+  // (not matched, not cancelled), silently rejoin instead of staying stuck.
+  let firstQueueSnapshot = true;
+  trackListener(ref(db, `queue/${uid}`), (snap) => {
+    if (firstQueueSnapshot) { firstQueueSnapshot = false; return; }
+    if (!snap.exists() && State.inQueue) {
+      set(ref(db, `queue/${uid}`), { joinedAt: Date.now(), displayId: State.displayId });
+    }
   });
 
   // Fires the moment SOME client's matching check pairs us with someone
@@ -239,6 +253,7 @@ $("#btnCancelQueue")?.addEventListener("click", async () => {
 });
 
 async function leaveQueue() {
+  State.inQueue = false;
   clearInterval(State.queuePoll);
   State.queuePoll = null;
   clearListeners();
@@ -251,6 +266,7 @@ async function leaveQueue() {
 
 // ---------------- room / chat ----------------
 async function enterRoom(roomId, room) {
+  State.inQueue = false;
   clearInterval(State.queuePoll);
   State.queuePoll = null;
   clearListeners();
