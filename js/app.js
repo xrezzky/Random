@@ -181,20 +181,6 @@ async function enterQueue() {
     $("#queueWait").textContent = `${n} ${n === 1 ? "person" : "people"} in queue right now`;
   });
 
-  // Self-heal: a brief connection drop (screen lock, app switch, network
-  // blip) triggers our own onDisconnect handler, which removes us from
-  // /queue. If that happens while we're still expecting to be waiting
-  // (not matched, not cancelled), silently rejoin instead of staying stuck.
-  let firstQueueSnapshot = true;
-  trackListener(ref(db, `queue/${uid}`), (snap) => {
-    if (firstQueueSnapshot) { firstQueueSnapshot = false; return; }
-    if (!snap.exists() && State.inQueue) {
-      dlog("self-heal: our queue entry vanished while still waiting — rejoining");
-      set(ref(db, `queue/${uid}`), { joinedAt: Date.now(), displayId: State.displayId })
-        .catch((e) => console.error("self-heal queue rejoin failed", e));
-    }
-  });
-
   // Fires the moment SOME client's matching check pairs us with someone
   // (could be triggered by our own check below, or anyone else's).
   const assignRef = ref(db, `matchAssignments/${uid}`);
@@ -220,63 +206,59 @@ async function enterQueue() {
 
 // The "server watches the queue" step. Any client calling this may end up
 // pairing two OTHER users, not itself — that's expected and correct FIFO
-// behavior. Atomic via a transaction scoped to /queue.
+// behavior. Atomic via a SINGLE transaction scoped to /queue.
+//
+// IMPORTANT: ghost-entry pruning is folded into this SAME transaction
+// (rather than a separate update() call beforehand). Mixing a plain write
+// with a transaction on the same path causes Firebase to detect "data
+// changed underneath me" repeatedly, exhaust its retry budget, and reject
+// the transaction outright — which is exactly what was happening before.
 async function checkQueueForMatch() {
-  await pruneStaleQueueEntries();
+  const presenceSnap = await get(ref(db, "presence"));
+  const presenceVal = presenceSnap.val() || {};
+  const now = Date.now();
+  const GRACE_MS = 8000;
 
   let pair = null;
   let sawEntries = 0;
+  let prunedUids = [];
 
   try {
     await runTransaction(ref(db, "queue"), (current) => {
       if (!current) { sawEntries = 0; return; }
-      const entries = Object.entries(current).sort((a, b) => (a[1].joinedAt || 0) - (b[1].joinedAt || 0));
+
+      prunedUids = [];
+      const cleaned = {};
+      for (const [uid, entry] of Object.entries(current)) {
+        const age = now - (entry?.joinedAt || 0);
+        if (age > GRACE_MS && !presenceVal[uid]) { prunedUids.push(uid); continue; }
+        cleaned[uid] = entry;
+      }
+
+      const entries = Object.entries(cleaned).sort((a, b) => (a[1].joinedAt || 0) - (b[1].joinedAt || 0));
       sawEntries = entries.length;
-      if (entries.length < 2) return; // fewer than 2 waiting — abort, no write
+
+      if (entries.length < 2) {
+        return prunedUids.length ? cleaned : undefined; // only write if we actually pruned something
+      }
 
       const [idA] = entries[0];
       const [idB] = entries[1];
       pair = [idA, idB];
-      delete current[idA];
-      delete current[idB];
-      return current;
+      delete cleaned[idA];
+      delete cleaned[idB];
+      return cleaned;
     });
   } catch (err) {
     dlog(`checkQueueForMatch TRANSACTION ERROR: ${err?.name} | ${err?.code} | ${err?.message}`);
     return;
   }
 
+  if (prunedUids.length) dlog(`pruned ${prunedUids.length} ghost entr${prunedUids.length === 1 ? "y" : "ies"}: ${prunedUids.map((u) => u.slice(0, 6)).join(", ")}`);
   dlog(`checkQueueForMatch: saw ${sawEntries} in queue, paired=${pair ? pair.map((p) => p.slice(0, 6)).join("+") : "no"}`);
 
   if (!pair) return;
   await createRoomForPair(pair[0], pair[1]);
-}
-
-// Ghost-entry cleanup: a queue entry whose owner is no longer in /presence
-// (tab closed without onDisconnect finishing, old test session, etc.) would
-// otherwise sit at the front of the FIFO line forever and block real users
-// from ever being paired. A grace period avoids pruning an entry that was
-// only just created (presence write/read may not have fully propagated
-// yet). Safe to run redundantly — removing an already-removed key is a no-op.
-async function pruneStaleQueueEntries() {
-  const GRACE_MS = 8000;
-  const [queueSnap, presenceSnap] = await Promise.all([
-    get(ref(db, "queue")),
-    get(ref(db, "presence")),
-  ]);
-  const queueVal = queueSnap.val();
-  if (!queueVal) return;
-  const presenceVal = presenceSnap.val() || {};
-  const now = Date.now();
-  const updates = {};
-  for (const [uid, entry] of Object.entries(queueVal)) {
-    const age = now - (entry?.joinedAt || 0);
-    if (age > GRACE_MS && !presenceVal[uid]) updates[`queue/${uid}`] = null;
-  }
-  if (Object.keys(updates).length) {
-    dlog(`pruneStaleQueueEntries: removing ${Object.keys(updates).length} ghost entr${Object.keys(updates).length === 1 ? "y" : "ies"}: ${Object.keys(updates).join(", ")}`);
-    await update(ref(db), updates);
-  }
 }
 
 async function createRoomForPair(idA, idB) {
