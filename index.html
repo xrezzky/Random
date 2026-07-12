@@ -6,7 +6,7 @@
 <title>XRZ — Anonymous Random Chat</title>
 <meta name="description" content="Meet random people instantly. No account required. Just chat." />
 <link rel="icon" href="icons/favicon.svg" type="image/svg+xml" />
-<link rel="stylesheet" href="css/style.css?v=15" />
+<link rel="stylesheet" href="css/style.css?v=16" />
 </head>
 <body>
 
@@ -23,7 +23,7 @@
     <div class="topbar-status" id="topbarStatus">
       <span class="dot dot-off" id="statusDot"></span>
       <span id="statusText">Offline</span>
-      <span style="color:var(--text-2);opacity:.5;margin-left:8px;">v15</span>
+      <span style="color:var(--text-2);opacity:.5;margin-left:8px;">v16</span>
     </div>
   </div>
 </header>
@@ -119,8 +119,10 @@
         </div>
       </div>
 
-      <div class="chat-body" id="chatBody">
-        <div class="system-msg">You're now chatting with a stranger. Say hi 👋</div>
+      <div class="chat-body-wrap">
+        <div class="chat-body" id="chatBody">
+          <div class="system-msg">You're now chatting with a stranger. Say hi 👋</div>
+        </div>
       </div>
 
       <div class="typing-row" id="typingRow" hidden>
@@ -167,9 +169,21 @@
   </div>
 </div>
 
+<!-- ============ CONFIRM MODAL (Next / Disconnect) ============ -->
+<div class="modal-overlay" id="confirmModal" hidden>
+  <div class="modal-card">
+    <h3 id="confirmTitle">Are you sure?</h3>
+    <p class="muted" id="confirmBody">This action can't be undone.</p>
+    <div class="panel-actions">
+      <button class="btn btn-ghost" id="btnConfirmCancel">Cancel</button>
+      <button class="btn btn-danger" id="btnConfirmOk">Confirm</button>
+    </div>
+  </div>
+</div>
+
 <!-- ============ TOASTS ============ -->
 <div class="toast-stack" id="toastStack"></div>
 
-<script type="module" src="js/app.js?v=15"></script>
+<script type="module" src="js/app.js?v=16"></script>
 </body>
 </html>
