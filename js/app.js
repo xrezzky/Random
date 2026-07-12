@@ -69,6 +69,17 @@ function clearListeners() {
 }
 
 // ---------------- session bootstrap ----------------
+// Wraps an async step with a label so a failure says exactly which write
+// broke, instead of a generic "set" from the SDK's internal error code.
+async function step(label, fn) {
+  try {
+    return await fn();
+  } catch (err) {
+    err.stepLabel = label;
+    throw err;
+  }
+}
+
 async function ensureSession() {
   if (State.uid) return State.uid;
   await authReady;
@@ -76,15 +87,15 @@ async function ensureSession() {
   State.uid = uid;
   State.displayId = randomId("Guest");
 
-  await set(ref(db, `sessions/${uid}`), {
+  await step("sessions-write", () => set(ref(db, `sessions/${uid}`), {
     displayId: State.displayId,
     status: "idle",
     createdAt: serverTimestamp(),
     lastSeenAt: serverTimestamp(),
-  });
+  }));
 
   const presenceRef = ref(db, `presence/${uid}`);
-  await set(presenceRef, { displayId: State.displayId, at: serverTimestamp() });
+  await step("presence-write", () => set(presenceRef, { displayId: State.displayId, at: serverTimestamp() }));
   onDisconnect(presenceRef).remove().catch((e) => console.error("onDisconnect presence failed", e));
   onDisconnect(ref(db, `sessions/${uid}/status`)).set("idle").catch((e) => console.error("onDisconnect status failed", e));
   // if the tab dies while queued, don't leave a ghost entry blocking FIFO
@@ -127,8 +138,10 @@ $("#btnConsentContinue")?.addEventListener("click", async () => {
     await enterQueue();
   } catch (err) {
     console.error(err);
-    const detail = err?.code || err?.message || err?.name || JSON.stringify(err) || String(err);
-    toast(`Session error: ${detail}`, "danger");
+    const parts = [err?.name, err?.code, err?.message].filter(Boolean);
+    const detail = parts.length ? parts.join(" | ") : String(err);
+    const label = err?.stepLabel ? ` [${err.stepLabel}]` : "";
+    toast(`Session error${label}: ${detail}`, "danger");
     showScreen("screen-landing");
   }
 });
@@ -140,8 +153,8 @@ async function enterQueue() {
   $("#queueWait").textContent = "Estimated wait: a few seconds";
 
   State.inQueue = true;
-  await update(ref(db, `sessions/${uid}`), { status: "queued" });
-  await set(ref(db, `queue/${uid}`), { joinedAt: Date.now(), displayId: State.displayId });
+  await step("session-status-queued", () => update(ref(db, `sessions/${uid}`), { status: "queued" }));
+  await step("queue-write", () => set(ref(db, `queue/${uid}`), { joinedAt: Date.now(), displayId: State.displayId }));
 
   trackListener(ref(db, "queue"), (snap) => {
     const n = snap.exists() ? Object.keys(snap.val()).length : 0;
@@ -156,7 +169,8 @@ async function enterQueue() {
   trackListener(ref(db, `queue/${uid}`), (snap) => {
     if (firstQueueSnapshot) { firstQueueSnapshot = false; return; }
     if (!snap.exists() && State.inQueue) {
-      set(ref(db, `queue/${uid}`), { joinedAt: Date.now(), displayId: State.displayId });
+      set(ref(db, `queue/${uid}`), { joinedAt: Date.now(), displayId: State.displayId })
+        .catch((e) => console.error("self-heal queue rejoin failed", e));
     }
   });
 
@@ -558,7 +572,8 @@ setInterval(() => {
 // completely silently. This is a diagnostic net, not normal-path behavior.
 window.addEventListener("unhandledrejection", (event) => {
   const reason = event.reason;
-  const detail = reason?.code || reason?.message || reason?.name || String(reason);
+  const parts = [reason?.name, reason?.code, reason?.message].filter(Boolean);
+  const detail = parts.length ? parts.join(" | ") : String(reason);
   console.error("Unhandled rejection:", reason);
   toast(`Unexpected error: ${detail}`, "danger");
 });
