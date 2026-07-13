@@ -245,6 +245,28 @@ async function enterQueue() {
     $("#queueWait").textContent = `${n} ${n === 1 ? "person" : "people"} in queue right now`;
   });
 
+  // Reconnect handling: mobile browsers frequently drop the Firebase
+  // WebSocket briefly (screen lock, backgrounding, switching WiFi/cell),
+  // which fires our own onDisconnect and removes us from /queue. When
+  // .info/connected flips back to true, verify we're still queued and, if
+  // not, rejoin. A plain set() on our OWN leaf is safe here (idempotent,
+  // no risk of clobbering anyone else's entry) — no need for a
+  // whole-node transaction.
+  let wasConnected = true;
+  trackListener(ref(db, ".info/connected"), async (snap) => {
+    const connected = snap.val() === true;
+    if (connected && !wasConnected && State.inQueue && !State.room) {
+      dlog("[QUEUE] reconnected — verifying we're still in queue");
+      const mySnap = await get(ref(db, `queue/${uid}`));
+      if (!mySnap.exists()) {
+        dlog("[QUEUE] entry was dropped by a disconnect — rejoining");
+        await set(ref(db, `queue/${uid}`), { joinedAt: Date.now(), displayId: State.displayId })
+          .catch((e) => dlog(`[QUEUE] rejoin failed: ${e?.message}`));
+      }
+    }
+    wasConnected = connected;
+  });
+
   // Fires the moment SOME client's matching check pairs us with someone
   // (could be triggered by our own check below, or anyone else's).
   const assignRef = ref(db, `matchAssignments/${uid}`);
@@ -277,74 +299,91 @@ async function enterQueue() {
 
 // The "server watches the queue" step. Any client calling this may end up
 // pairing two OTHER users, not itself — that's expected and correct FIFO
-// behavior. Atomic via a SINGLE transaction scoped to /queue.
+// behavior.
 //
-// IMPORTANT: ghost-entry pruning is folded into this SAME transaction
-// (rather than a separate update() call beforehand). Mixing a plain write
-// with a transaction on the same path causes Firebase to detect "data
-// changed underneath me" repeatedly, exhaust its retry budget, and reject
-// the transaction outright — which is exactly what was happening before.
+// IMPORTANT: this used to run a single runTransaction() spanning the WHOLE
+// /queue node (all waiting users at once). Debug logs proved that
+// unreliable in practice — the transaction's callback would sometimes see
+// current=null (empty) in the exact same instant a plain get() on the same
+// path correctly returned real data. Root cause looks like a stale local
+// synctree view interacting badly with the parallel onValue listener also
+// registered on "/queue" for the UI counter.
+//
+// Fix: read the queue with a plain get() (always accurate, no transaction
+// cache ambiguity), then atomically CLAIM each of the two chosen entries
+// individually via a small transaction scoped to just that one leaf
+// (queue/{uid}) — the standard, well-tested Firebase "claim/lock" pattern.
 async function checkQueueForMatch() {
   const now = Date.now();
-  const STALE_MS = 3 * 60 * 1000; // 3 minutes — presence flaps too easily on
-  // mobile (screen lock, app switch) to be trusted for pruning; this is a
-  // pure time-based safety net for genuinely abandoned entries only.
+  const STALE_MS = 3 * 60 * 1000; // pure time-based ghost cleanup, no presence dependency
 
-  let pair = null;
-  let sawEntries = 0;
-  let prunedUids = [];
-
+  let snap;
   try {
-    await runTransaction(ref(db, "queue"), (current) => {
-      if (!current) { sawEntries = 0; return; }
-
-      prunedUids = [];
-      const cleaned = {};
-      for (const [uid, entry] of Object.entries(current)) {
-        const age = now - (entry?.joinedAt || 0);
-        if (age > STALE_MS) { prunedUids.push(uid); continue; }
-        cleaned[uid] = entry;
-      }
-
-      const entries = Object.entries(cleaned).sort((a, b) => (a[1].joinedAt || 0) - (b[1].joinedAt || 0));
-      sawEntries = entries.length;
-
-      if (entries.length < 2) {
-        return prunedUids.length ? cleaned : undefined; // only write if we actually pruned something
-      }
-
-      const [idA] = entries[0];
-      const [idB] = entries[1];
-      pair = [idA, idB];
-      delete cleaned[idA];
-      delete cleaned[idB];
-      return cleaned;
-    });
+    snap = await get(ref(db, "queue"));
   } catch (err) {
-    dlog(`[TRANSACTION] ERROR: ${err?.name} | ${err?.code} | ${err?.message}`);
-    console.error("[TRANSACTION] failed", err, err?.stack);
+    dlog(`[TRANSACTION] queue read ERROR: ${err?.name} | ${err?.code} | ${err?.message}`);
     return;
   }
 
-  if (prunedUids.length) dlog(`[QUEUE] pruned ${prunedUids.length} stale entr${prunedUids.length === 1 ? "y" : "ies"} (>3min old): ${prunedUids.map((u) => u.slice(0, 6)).join(", ")}`);
-  dlog(`[TRANSACTION] saw ${sawEntries} in queue, paired=${pair ? pair.map((p) => p.slice(0, 6)).join("+") : "no"}`);
-
-  if (sawEntries === 0 && State.inQueue) {
-    // Diagnostic: the transaction says the queue is empty, but we ourselves
-    // should still be in it. Do a direct (non-transactional) read to check
-    // whether this is a transaction-view staleness issue or a genuinely
-    // empty queue (e.g. we got pruned/removed by something else).
-    try {
-      const directSnap = await get(ref(db, "queue"));
-      const directVal = directSnap.val();
-      dlog(`[TRANSACTION] diagnostic direct-read: ${directVal ? Object.keys(directVal).length + " entries: " + Object.keys(directVal).map(u=>u.slice(0,6)).join(",") : "null/empty"}`);
-    } catch (e) {
-      dlog(`[TRANSACTION] diagnostic read failed: ${e?.message}`);
-    }
+  const current = snap.val();
+  if (!current) {
+    dlog("[TRANSACTION] saw 0 in queue, paired=no");
+    return;
   }
 
-  if (!pair) return;
-  await createRoomForPair(pair[0], pair[1]);
+  const prunedUids = [];
+  const liveEntries = [];
+  for (const [uid, entry] of Object.entries(current)) {
+    const age = now - (entry?.joinedAt || 0);
+    if (age > STALE_MS) prunedUids.push(uid);
+    else liveEntries.push([uid, entry]);
+  }
+  if (prunedUids.length) {
+    const updates = {};
+    prunedUids.forEach((u) => { updates[`queue/${u}`] = null; });
+    await update(ref(db), updates).catch((e) => dlog(`[QUEUE] prune write failed: ${e?.message}`));
+    dlog(`[QUEUE] pruned ${prunedUids.length} stale entr${prunedUids.length === 1 ? "y" : "ies"} (>3min old): ${prunedUids.map((u) => u.slice(0, 6)).join(", ")}`);
+  }
+
+  liveEntries.sort((a, b) => (a[1].joinedAt || 0) - (b[1].joinedAt || 0));
+  dlog(`[TRANSACTION] saw ${liveEntries.length} in queue, paired=${liveEntries.length >= 2 ? "trying" : "no"}`);
+
+  if (liveEntries.length < 2) return;
+
+  const [idA, entryA] = liveEntries[0];
+  const [idB] = liveEntries[1];
+
+  const claimedA = await claimQueueEntry(idA);
+  if (!claimedA) {
+    dlog(`[PAIR] could not claim ${idA.slice(0, 6)} — someone else got there first`);
+    return;
+  }
+
+  const claimedB = await claimQueueEntry(idB);
+  if (!claimedB) {
+    dlog(`[PAIR] could not claim ${idB.slice(0, 6)} — restoring ${idA.slice(0, 6)} to queue`);
+    await set(ref(db, `queue/${idA}`), entryA).catch((e) => dlog(`[PAIR] restore failed: ${e?.message}`));
+    return;
+  }
+
+  dlog(`[PAIR] claimed both ${idA.slice(0, 6)} + ${idB.slice(0, 6)}`);
+  await createRoomForPair(idA, idB);
+}
+
+// Atomically claims (removes) a single queue entry. Scoped to ONE leaf path
+// — much smaller and more reliable than a transaction spanning the entire
+// /queue node. Returns true only if WE were the one who removed it.
+async function claimQueueEntry(uid) {
+  try {
+    const result = await runTransaction(ref(db, `queue/${uid}`), (current) => {
+      if (!current) return; // already gone (claimed by someone else) — abort
+      return null; // claim = delete
+    });
+    return result.committed && result.snapshot.val() === null;
+  } catch (err) {
+    dlog(`[PAIR] claim transaction error for ${uid.slice(0, 6)}: ${err?.name} | ${err?.message}`);
+    return false;
+  }
 }
 
 async function createRoomForPair(idA, idB) {
