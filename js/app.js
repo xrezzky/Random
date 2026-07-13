@@ -285,10 +285,10 @@ async function enterQueue() {
 // changed underneath me" repeatedly, exhaust its retry budget, and reject
 // the transaction outright — which is exactly what was happening before.
 async function checkQueueForMatch() {
-  const presenceSnap = await get(ref(db, "presence"));
-  const presenceVal = presenceSnap.val() || {};
   const now = Date.now();
-  const GRACE_MS = 8000;
+  const STALE_MS = 3 * 60 * 1000; // 3 minutes — presence flaps too easily on
+  // mobile (screen lock, app switch) to be trusted for pruning; this is a
+  // pure time-based safety net for genuinely abandoned entries only.
 
   let pair = null;
   let sawEntries = 0;
@@ -302,7 +302,7 @@ async function checkQueueForMatch() {
       const cleaned = {};
       for (const [uid, entry] of Object.entries(current)) {
         const age = now - (entry?.joinedAt || 0);
-        if (age > GRACE_MS && !presenceVal[uid]) { prunedUids.push(uid); continue; }
+        if (age > STALE_MS) { prunedUids.push(uid); continue; }
         cleaned[uid] = entry;
       }
 
@@ -326,8 +326,22 @@ async function checkQueueForMatch() {
     return;
   }
 
-  if (prunedUids.length) dlog(`[QUEUE] pruned ${prunedUids.length} ghost entr${prunedUids.length === 1 ? "y" : "ies"}: ${prunedUids.map((u) => u.slice(0, 6)).join(", ")}`);
+  if (prunedUids.length) dlog(`[QUEUE] pruned ${prunedUids.length} stale entr${prunedUids.length === 1 ? "y" : "ies"} (>3min old): ${prunedUids.map((u) => u.slice(0, 6)).join(", ")}`);
   dlog(`[TRANSACTION] saw ${sawEntries} in queue, paired=${pair ? pair.map((p) => p.slice(0, 6)).join("+") : "no"}`);
+
+  if (sawEntries === 0 && State.inQueue) {
+    // Diagnostic: the transaction says the queue is empty, but we ourselves
+    // should still be in it. Do a direct (non-transactional) read to check
+    // whether this is a transaction-view staleness issue or a genuinely
+    // empty queue (e.g. we got pruned/removed by something else).
+    try {
+      const directSnap = await get(ref(db, "queue"));
+      const directVal = directSnap.val();
+      dlog(`[TRANSACTION] diagnostic direct-read: ${directVal ? Object.keys(directVal).length + " entries: " + Object.keys(directVal).map(u=>u.slice(0,6)).join(",") : "null/empty"}`);
+    } catch (e) {
+      dlog(`[TRANSACTION] diagnostic read failed: ${e?.message}`);
+    }
+  }
 
   if (!pair) return;
   await createRoomForPair(pair[0], pair[1]);
