@@ -346,7 +346,7 @@ async function checkQueueForMatch() {
   }
 
   liveEntries.sort((a, b) => (a[1].joinedAt || 0) - (b[1].joinedAt || 0));
-  dlog(`[TRANSACTION] saw ${liveEntries.length} in queue, paired=${liveEntries.length >= 2 ? "trying" : "no"}`);
+  dlog(`[TRANSACTION] saw ${liveEntries.length} in queue [${liveEntries.map(([u]) => u.slice(0, 8)).join(", ")}], paired=${liveEntries.length >= 2 ? "trying" : "no"}`);
 
   if (liveEntries.length < 2) return;
 
