@@ -389,14 +389,10 @@ async function claimQueueEntry(uid) {
 async function createRoomForPair(idA, idB) {
   dlog(`[PAIR] createRoomForPair: pairing ${idA.slice(0, 6)} + ${idB.slice(0, 6)}`);
   try {
-    // Astronomically unlikely to collide (62^20 keyspace), but check anyway
-    // and retry a couple of times rather than trust blind luck.
-    let roomId = generateRoomId();
-    for (let attempt = 0; attempt < 3; attempt++) {
-      const existsSnap = await get(ref(db, `rooms/${roomId}`));
-      if (!existsSnap.exists()) break;
-      roomId = generateRoomId();
-    }
+    // 62^20 keyspace (~7×10^35) — collision odds are astronomically
+    // negligible, and checking for one would require reading a room we
+    // don't belong to yet, which security rules correctly deny. Just use it.
+    const roomId = generateRoomId();
 
     const roomData = {
       userA: idA,
