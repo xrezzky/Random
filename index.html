@@ -1,12 +1,12 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="id">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0" />
-<title>XRZ — Anonymous Random Chat</title>
-<meta name="description" content="Meet random people instantly. No account required. Just chat." />
+<title>XRZ — Chat Acak Anonim</title>
+<meta name="description" content="Temui orang baru secara instan. Tanpa akun. Langsung ngobrol." />
 <link rel="icon" href="/icons/favicon.svg" type="image/svg+xml" />
-<link rel="stylesheet" href="/css/style.css?v=24" />
+<link rel="stylesheet" href="/css/style.css?v=26" />
 </head>
 <body>
 
@@ -21,9 +21,10 @@
       <span>XRZ</span>
     </div>
     <div class="topbar-status" id="topbarStatus">
+      <button id="btnThemeToggle" class="theme-toggle" aria-label="Ganti tema" title="Ganti tema">🌙</button>
       <span class="dot dot-off" id="statusDot"></span>
       <span id="statusText">Offline</span>
-      <span style="color:var(--text-2);opacity:.5;margin-left:8px;">v24</span>
+      <span style="color:var(--text-2);opacity:.5;margin-left:8px;">v26</span>
     </div>
   </div>
 </header>
@@ -33,30 +34,30 @@
   <!-- ============ SCREEN: LANDING ============ -->
   <section class="screen active" id="screen-landing">
     <div class="hero-card">
-      <span class="eyebrow">No login · No email · No trace</span>
-      <h1>Anonymous Random Chat</h1>
-      <p class="lead">Meet random people instantly. No account required. No registration. Just chat.</p>
+      <span class="eyebrow">Tanpa Login · Tanpa Email · Tanpa Jejak</span>
+      <h1>Chat Acak Anonim</h1>
+      <p class="lead">Temui orang baru secara instan. Tanpa akun. Tanpa registrasi. Langsung ngobrol.</p>
       <div class="hero-actions">
-        <button class="btn btn-primary btn-lg" id="btnStartChat">Start Chat</button>
+        <button class="btn btn-primary btn-lg" id="btnStartChat">Mulai Chat</button>
       </div>
       <div class="hero-links">
-        <button class="link-btn" id="btnPrivacy">Privacy Policy</button>
+        <button class="link-btn" id="btnPrivacy">Kebijakan Privasi</button>
         <span class="sep">·</span>
-        <button class="link-btn" id="btnTerms">Terms</button>
+        <button class="link-btn" id="btnTerms">Ketentuan</button>
       </div>
     </div>
     <div class="hero-meta">
       <div class="meta-card">
         <strong id="onlineCount">—</strong>
-        <span>people online now</span>
+        <span>orang online sekarang</span>
       </div>
       <div class="meta-card">
         <strong>0:00</strong>
-        <span>avg. matching time</span>
+        <span>rata-rata waktu mencari</span>
       </div>
       <div class="meta-card">
         <strong>AI</strong>
-        <span>monitored for safety</span>
+        <span>diawasi demi keamanan</span>
       </div>
     </div>
   </section>
@@ -64,29 +65,29 @@
   <!-- ============ SCREEN: CONSENT ============ -->
   <section class="screen" id="screen-consent">
     <div class="panel-card">
-      <h2>Before you jump in</h2>
-      <p class="muted">Please confirm all four to continue.</p>
+      <h2>Sebelum mulai</h2>
+      <p class="muted">Centang semua sebelum lanjut.</p>
       <div class="check-list">
         <label class="check-row">
           <input type="checkbox" class="consent-box" />
-          <span>I agree to the <button class="inline-link" id="linkTos1">Terms of Service</button>.</span>
+          <span>Saya setuju dengan <button class="inline-link" id="linkTos1">Ketentuan Layanan</button>.</span>
         </label>
         <label class="check-row">
           <input type="checkbox" class="consent-box" />
-          <span>I agree to the <button class="inline-link" id="linkPrivacy1">Privacy Policy</button>.</span>
+          <span>Saya setuju dengan <button class="inline-link" id="linkPrivacy1">Kebijakan Privasi</button>.</span>
         </label>
         <label class="check-row">
           <input type="checkbox" class="consent-box" />
-          <span>I understand chats are monitored by AI for safety.</span>
+          <span>Saya paham obrolan diawasi AI demi keamanan.</span>
         </label>
         <label class="check-row">
           <input type="checkbox" class="consent-box" />
-          <span>I understand violations may result in removal or temporary restriction.</span>
+          <span>Saya paham pelanggaran bisa berujung pemutusan atau pembatasan sementara.</span>
         </label>
       </div>
       <div class="panel-actions">
-        <button class="btn btn-ghost" id="btnConsentBack">Back</button>
-        <button class="btn btn-primary" id="btnConsentContinue" disabled>Start Matching</button>
+        <button class="btn btn-ghost" id="btnConsentBack">Kembali</button>
+        <button class="btn btn-primary" id="btnConsentContinue" disabled>Mulai Mencari</button>
       </div>
     </div>
   </section>
@@ -95,10 +96,10 @@
   <section class="screen" id="screen-queue">
     <div class="panel-card center">
       <div class="pulse-ring"><div class="pulse-core"></div></div>
-      <h2>Searching partner…</h2>
+      <h2>Mencari partner…</h2>
       <p class="muted" id="queueSession">session_—</p>
-      <p class="muted" id="queueWait">Estimated wait: calculating…</p>
-      <button class="btn btn-danger-outline" id="btnCancelQueue">Cancel</button>
+      <p class="muted" id="queueWait">Perkiraan tunggu: menghitung…</p>
+      <button class="btn btn-danger-outline" id="btnCancelQueue">Batal</button>
     </div>
   </section>
 
@@ -110,32 +111,32 @@
           <span class="dot dot-on"></span>
           <div>
             <strong id="partnerId">Anonymous-0000</strong>
-            <div class="chat-sub" id="chatStatusLine">Partner connected</div>
+            <div class="chat-sub" id="chatStatusLine">Partner tersambung</div>
           </div>
         </div>
         <div class="chat-header-actions">
-          <button class="btn btn-sm btn-ghost" id="btnReport">Report</button>
-          <button class="btn btn-sm btn-danger-outline" id="btnDisconnect">Disconnect</button>
+          <button class="btn btn-sm btn-ghost" id="btnReport">Laporkan</button>
+          <button class="btn btn-sm btn-danger-outline" id="btnDisconnect">Akhiri Obrolan</button>
         </div>
       </div>
 
       <div class="chat-body-wrap">
         <div class="chat-body" id="chatBody">
-          <div class="system-msg">You're now chatting with a stranger. Say hi 👋</div>
+          <div class="system-msg">Kamu sekarang terhubung dengan orang asing. Sapa dia 👋</div>
         </div>
       </div>
 
       <div class="typing-row" id="typingRow" hidden>
-        <span class="typing-dots"><i></i><i></i><i></i></span> Stranger is typing…
+        <span class="typing-dots"><i></i><i></i><i></i></span> Orang asing sedang mengetik…
       </div>
 
       <form class="chat-input-row" id="chatForm">
-        <input type="text" id="chatInput" maxlength="500" placeholder="Type a message…" autocomplete="off" />
-        <button type="submit" class="btn btn-primary" id="btnSend">Send</button>
+        <input type="text" id="chatInput" maxlength="500" placeholder="Ketik pesan…" autocomplete="off" />
+        <button type="submit" class="btn btn-primary" id="btnSend">Kirim</button>
       </form>
 
       <div class="chat-footer-actions">
-        <button class="btn btn-secondary" id="btnNext">Next Partner</button>
+        <button class="btn btn-secondary" id="btnNext">Partner Baru</button>
       </div>
     </div>
   </section>
@@ -152,28 +153,28 @@
 </main>
 
 <details id="debugPanel" style="max-width:560px;margin:0 auto 40px;padding:0 20px;">
-  <summary style="color:var(--text-2);font-size:12px;cursor:pointer;">Debug Log (tap to expand)</summary>
+  <summary style="color:var(--text-2);font-size:12px;cursor:pointer;">Log Debug (tap untuk buka)</summary>
   <div id="debugLog" style="margin-top:8px;background:#0B1220;border:1.5px solid var(--border);border-radius:10px;padding:10px 12px;font-family:monospace;font-size:11px;line-height:1.6;color:#94A3B8;max-height:300px;overflow-y:auto;text-align:left;white-space:pre-wrap;word-break:break-word;"></div>
 </details>
 
 <!-- ============ REPORT MODAL ============ -->
 <div class="modal-overlay" id="reportModal" hidden>
   <div class="modal-card">
-    <h3>Report this user</h3>
-    <p class="muted">Your report is sent straight to the moderation team.</p>
+    <h3>Laporkan pengguna ini</h3>
+    <p class="muted">Laporanmu langsung dikirim ke tim moderasi.</p>
     <div class="reason-grid" id="reasonGrid">
       <button class="reason-chip" data-reason="spam">Spam</button>
-      <button class="reason-chip" data-reason="harassment">Harassment</button>
-      <button class="reason-chip" data-reason="threat">Threat</button>
-      <button class="reason-chip" data-reason="scam">Scam</button>
-      <button class="reason-chip" data-reason="explicit">Explicit Content</button>
-      <button class="reason-chip" data-reason="illegal">Illegal Content</button>
-      <button class="reason-chip" data-reason="other">Other</button>
+      <button class="reason-chip" data-reason="harassment">Pelecehan</button>
+      <button class="reason-chip" data-reason="threat">Ancaman</button>
+      <button class="reason-chip" data-reason="scam">Penipuan</button>
+      <button class="reason-chip" data-reason="explicit">Konten Eksplisit</button>
+      <button class="reason-chip" data-reason="illegal">Konten Ilegal</button>
+      <button class="reason-chip" data-reason="other">Lainnya</button>
     </div>
-    <textarea id="reportDetails" placeholder="Optional details…" maxlength="300"></textarea>
+    <textarea id="reportDetails" placeholder="Detail tambahan (opsional)…" maxlength="300"></textarea>
     <div class="panel-actions">
-      <button class="btn btn-ghost" id="btnCancelReport">Cancel</button>
-      <button class="btn btn-danger" id="btnSubmitReport" disabled>Submit Report</button>
+      <button class="btn btn-ghost" id="btnCancelReport">Batal</button>
+      <button class="btn btn-danger" id="btnSubmitReport" disabled>Kirim Laporan</button>
     </div>
   </div>
 </div>
@@ -181,11 +182,11 @@
 <!-- ============ CONFIRM MODAL (Next / Disconnect) ============ -->
 <div class="modal-overlay" id="confirmModal" hidden>
   <div class="modal-card">
-    <h3 id="confirmTitle">Are you sure?</h3>
-    <p class="muted" id="confirmBody">This action can't be undone.</p>
+    <h3 id="confirmTitle">Yakin?</h3>
+    <p class="muted" id="confirmBody">Tindakan ini tidak bisa dibatalkan.</p>
     <div class="panel-actions">
-      <button class="btn btn-ghost" id="btnConfirmCancel">Cancel</button>
-      <button class="btn btn-danger" id="btnConfirmOk">Confirm</button>
+      <button class="btn btn-ghost" id="btnConfirmCancel">Batal</button>
+      <button class="btn btn-danger" id="btnConfirmOk">Konfirmasi</button>
     </div>
   </div>
 </div>
@@ -193,6 +194,6 @@
 <!-- ============ TOASTS ============ -->
 <div class="toast-stack" id="toastStack"></div>
 
-<script type="module" src="/js/app.js?v=24"></script>
+<script type="module" src="/js/app.js?v=26"></script>
 </body>
 </html>
