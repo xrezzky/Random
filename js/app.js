@@ -64,6 +64,34 @@ function generateRoomId(length = 20) {
   return id;
 }
 
+// ---------------- theme (dark/light) ----------------
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  const btn = $("#btnThemeToggle");
+  if (btn) btn.textContent = theme === "light" ? "☀️" : "🌙";
+}
+(function initTheme() {
+  const saved = localStorage.getItem("xrz-theme");
+  const prefersLight = window.matchMedia?.("(prefers-color-scheme: light)").matches;
+  applyTheme(saved || (prefersLight ? "light" : "dark"));
+})();
+$("#btnThemeToggle")?.addEventListener("click", () => {
+  const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+  applyTheme(next);
+  localStorage.setItem("xrz-theme", next);
+});
+
+// ---------------- back-button trap while in an active room ----------------
+// If someone arrives via a shared /r/{roomId} link (or navigates there
+// during the session), pressing Back shouldn't dump them out of an active
+// chat — re-push the same URL so they stay put until they explicitly end
+// the conversation.
+window.addEventListener("popstate", () => {
+  if (State.room) {
+    history.pushState({ roomId: State.room.id }, "", `/r/${State.room.id}`);
+  }
+});
+
 function toast(message, kind = "") {
   const stack = $("#toastStack");
   const el = document.createElement("div");
@@ -146,10 +174,10 @@ async function ensureSession() {
 $("#btnStartChat")?.addEventListener("click", () => showScreen("screen-consent"));
 $("#btnConsentBack")?.addEventListener("click", () => showScreen("screen-landing"));
 
-$("#btnPrivacy")?.addEventListener("click", () => toast("Privacy Policy — add your policy page/link here."));
-$("#btnTerms")?.addEventListener("click", () => toast("Terms — add your terms page/link here."));
-$("#linkTos1")?.addEventListener("click", (e) => { e.preventDefault(); toast("Terms — add your terms page/link here."); });
-$("#linkPrivacy1")?.addEventListener("click", (e) => { e.preventDefault(); toast("Privacy Policy — add your policy page/link here."); });
+$("#btnPrivacy")?.addEventListener("click", () => toast("Kebijakan Privasi — halaman ini belum tersedia."));
+$("#btnTerms")?.addEventListener("click", () => toast("Ketentuan — halaman ini belum tersedia."));
+$("#linkTos1")?.addEventListener("click", (e) => { e.preventDefault(); toast("Ketentuan — halaman ini belum tersedia."); });
+$("#linkPrivacy1")?.addEventListener("click", (e) => { e.preventDefault(); toast("Kebijakan Privasi — halaman ini belum tersedia."); });
 
 $all(".consent-box").forEach((box) => {
   box.addEventListener("change", () => {
@@ -179,7 +207,7 @@ async function beginMatching() {
     const ban = banSnap.val();
     if (ban && ban.bannedUntil && ban.bannedUntil > Date.now()) {
       const until = new Date(ban.bannedUntil).toLocaleTimeString();
-      toast(`You're temporarily restricted until ${until}.`, "danger");
+      toast(`Kamu dibatasi sementara sampai ${until}.`, "danger");
       showScreen("screen-landing");
       return;
     }
@@ -199,7 +227,7 @@ async function beginMatching() {
     const detail = parts.length ? parts.join(" | ") : String(err);
     const label = err?.stepLabel ? ` [${err.stepLabel}]` : "";
     dlog(`[SESSION] ERROR${label}: ${detail}`);
-    toast(`Session error${label}: ${detail}`, "danger");
+    toast(`Error sesi${label}: ${detail}`, "danger");
     showScreen("screen-landing");
   }
 }
@@ -233,7 +261,7 @@ async function checkRateLimit(uid) {
 async function enterQueue() {
   const uid = await ensureSession();
   $("#queueSession").textContent = `session_${uid.slice(0, 7).toUpperCase()}`;
-  $("#queueWait").textContent = "Estimated wait: a few seconds";
+  $("#queueWait").textContent = "Perkiraan tunggu: beberapa detik lagi";
 
   State.inQueue = true;
   await step("session-status-queued", () => update(ref(db, `sessions/${uid}`), { status: "queued" }));
@@ -451,9 +479,9 @@ async function enterRoom(roomId, room) {
     dlog(`[ENTER ROOM] partner displayId fetched: ${partnerSnap.val()}`);
 
     State.room = { id: roomId, partnerId };
-    $("#partnerId").textContent = partnerSnap.val() || "Anonymous";
-    $("#chatStatusLine").textContent = "Partner connected";
-    $("#chatBody").innerHTML = `<div class="system-msg">You're now chatting with a stranger. Say hi 👋</div>`;
+    $("#partnerId").textContent = partnerSnap.val() || "Anonim";
+    $("#chatStatusLine").textContent = "Partner tersambung";
+    $("#chatBody").innerHTML = `<div class="system-msg">Kamu sekarang terhubung dengan orang asing. Sapa dia 👋</div>`;
     Moderation.resetFloodWindow();
 
     await update(ref(db, `sessions/${State.uid}`), { status: "matched" });
@@ -488,20 +516,42 @@ async function enterRoom(roomId, room) {
     });
 
     // Partner presence: shows "Partner keluar." / "Partner kembali online."
-    // without ever touching the room itself.
+    // without ever touching the room itself. Debounced so a brief network
+    // blip (a couple seconds of connectivity hiccup) never flashes a false
+    // "keluar" — only a sustained absence counts as actually leaving.
     let firstPresenceSnapshot = true;
     let partnerWasOnline = true;
+    let offlineDebounceTimer = null;
     trackListener(ref(db, `presence/${partnerId}`), (snap) => {
       const isOnline = snap.exists();
       if (firstPresenceSnapshot) { firstPresenceSnapshot = false; partnerWasOnline = isOnline; return; }
-      if (isOnline === partnerWasOnline) return;
-      partnerWasOnline = isOnline;
-      $("#chatStatusLine").textContent = isOnline ? "Partner connected" : "Partner keluar.";
-      const el = document.createElement("div");
-      el.className = "system-msg";
-      el.textContent = isOnline ? "Partner kembali online." : "Partner keluar.";
-      $("#chatBody").appendChild(el);
-      $("#chatBody").scrollTop = $("#chatBody").scrollHeight;
+
+      if (isOnline) {
+        clearTimeout(offlineDebounceTimer);
+        if (partnerWasOnline) return; // was already considered online, nothing changed
+        partnerWasOnline = true;
+        $("#chatStatusLine").textContent = "Partner tersambung";
+        const el = document.createElement("div");
+        el.className = "system-msg";
+        el.textContent = "Partner kembali online.";
+        $("#chatBody").appendChild(el);
+        $("#chatBody").scrollTop = $("#chatBody").scrollHeight;
+        return;
+      }
+
+      // Went offline — wait a few seconds before believing it, in case
+      // they're just reconnecting (screen lock, app switch, flaky signal).
+      clearTimeout(offlineDebounceTimer);
+      offlineDebounceTimer = setTimeout(() => {
+        if (!partnerWasOnline) return; // already marked offline
+        partnerWasOnline = false;
+        $("#chatStatusLine").textContent = "Partner keluar.";
+        const el = document.createElement("div");
+        el.className = "system-msg";
+        el.textContent = "Partner keluar.";
+        $("#chatBody").appendChild(el);
+        $("#chatBody").scrollTop = $("#chatBody").scrollHeight;
+      }, 5000);
     });
 
     trackListener(ref(db, `typing/${roomId}/${partnerId}`), (snap) => {
@@ -513,7 +563,7 @@ async function enterRoom(roomId, room) {
   } catch (err) {
     dlog(`[ENTER ROOM] FATAL ERROR: ${err?.name} | ${err?.code} | ${err?.message}`);
     console.error("[ENTER ROOM] failed", err, err?.stack);
-    toast(`Failed to enter room: ${err?.message || err}`, "danger");
+    toast(`Gagal masuk ke room: ${err?.message || err}`, "danger");
     // Don't leave the user stranded on "Searching partner..." with a room
     // that's dead to them — send them back to try again.
     showScreen("screen-landing");
@@ -556,17 +606,17 @@ function handlePartnerLeft(reason) {
   State.partnerLeftHandled = true;
   dlog(`[CHAT] handlePartnerLeft(${reason}) — will show Room Ended screen`);
 
-  $("#chatStatusLine").textContent = "Partner disconnected";
+  $("#chatStatusLine").textContent = "Partner terputus";
   const body = $("#chatBody");
   const el = document.createElement("div");
   el.className = "system-msg";
   el.textContent = reason === "next"
-    ? "Stranger clicked Next and left the chat."
+    ? "Orang asing klik Partner Baru dan keluar dari obrolan."
     : reason === "violation"
-      ? "Chat ended — the other user violated the rules."
+      ? "Obrolan diakhiri — pengguna lain melanggar aturan."
       : reason === "deleted"
-        ? "This room was removed."
-        : "Stranger has disconnected.";
+        ? "Room ini telah dihapus."
+        : "Orang asing telah terputus.";
   body.appendChild(el);
   body.scrollTop = body.scrollHeight;
 
@@ -599,7 +649,7 @@ $("#chatForm")?.addEventListener("submit", async (e) => {
 
   if (State.cooldownUntil && Date.now() < State.cooldownUntil) {
     const secs = Math.ceil((State.cooldownUntil - Date.now()) / 1000);
-    toast(`Please wait ${secs}s before sending another message.`, "danger");
+    toast(`Tunggu ${secs} detik lagi sebelum kirim pesan lagi.`, "danger");
     return;
   }
 
@@ -622,7 +672,7 @@ $("#chatForm")?.addEventListener("submit", async (e) => {
       });
     } catch (err) {
       dlog(`[CHAT] send ERROR: ${err?.name} | ${err?.code} | ${err?.message}`);
-      toast("Message failed to send.", "danger");
+      toast("Pesan gagal terkirim.", "danger");
     }
     return;
   }
@@ -671,20 +721,20 @@ $("#chatForm")?.addEventListener("submit", async (e) => {
 
 function moderationMessage(reason) {
   const map = {
-    links: "Links aren't allowed in chat.",
-    spam: "That looks like spam.",
-    flood: "You're sending messages too fast — slow down.",
-    repeated_messages: "Please don't repeat the same message.",
-    empty: "Message can't be empty.",
-    too_long: "Message is too long (max 500 characters).",
-    harassment: "That message was blocked for violating our safety guidelines.",
-    explicit: "Explicit content isn't allowed here.",
-    threat: "Threatening content isn't allowed here.",
-    scam: "That message looked like a scam attempt and was blocked.",
-    illegal: "That content isn't allowed here.",
-    promo: "Self-promotion / links to other platforms aren't allowed.",
+    links: "Link tidak diperbolehkan di chat.",
+    spam: "Pesan itu kelihatan seperti spam.",
+    flood: "Kamu mengirim pesan terlalu cepat — pelan-pelan aja.",
+    repeated_messages: "Tolong jangan mengulang pesan yang sama.",
+    empty: "Pesan tidak boleh kosong.",
+    too_long: "Pesan terlalu panjang (maks 500 karakter).",
+    harassment: "Pesan itu diblokir karena melanggar aturan keamanan.",
+    explicit: "Konten eksplisit tidak diperbolehkan di sini.",
+    threat: "Konten mengancam tidak diperbolehkan di sini.",
+    scam: "Pesan itu terlihat seperti upaya penipuan dan diblokir.",
+    illegal: "Konten itu tidak diperbolehkan di sini.",
+    promo: "Promosi diri / link ke platform lain tidak diperbolehkan.",
   };
-  return map[reason] || "Your message was blocked by moderation.";
+  return map[reason] || "Pesanmu diblokir oleh sistem moderasi.";
 }
 
 $("#chatInput")?.addEventListener("input", () => {
@@ -807,7 +857,7 @@ $("#btnSubmitReport")?.addEventListener("click", async () => {
     createdAt: serverTimestamp(),
   });
   $("#reportModal").hidden = true;
-  toast("Report submitted. Thank you for keeping XRZ safe.", "success");
+  toast("Laporan terkirim. Makasih udah bantu jaga keamanan XRZ.", "success");
 });
 
 // ---------------- resume from shared URL (/r/{roomId}) ----------------
@@ -864,6 +914,6 @@ window.addEventListener("unhandledrejection", (event) => {
 
   const looksLikeFirebase = reason?.name === "FirebaseError" || /firebase/i.test(reason?.stack || "") || /firebase/i.test(detail);
   if (looksLikeFirebase) {
-    toast(`Unexpected error: ${detail}`, "danger");
+    toast(`Error tak terduga: ${detail}`, "danger");
   }
 });
