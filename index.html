@@ -6,7 +6,7 @@
 <title>XRZ — Chat Acak Anonim</title>
 <meta name="description" content="Temui orang baru secara instan. Tanpa akun. Langsung ngobrol." />
 <link rel="icon" href="/icons/favicon.svg" type="image/svg+xml" />
-<link rel="stylesheet" href="/css/style.css?v=26" />
+<link rel="stylesheet" href="/css/style.css?v=27" />
 </head>
 <body>
 
@@ -24,7 +24,7 @@
       <button id="btnThemeToggle" class="theme-toggle" aria-label="Ganti tema" title="Ganti tema">🌙</button>
       <span class="dot dot-off" id="statusDot"></span>
       <span id="statusText">Offline</span>
-      <span style="color:var(--text-2);opacity:.5;margin-left:8px;">v26</span>
+      <span style="color:var(--text-2);opacity:.5;margin-left:8px;">v27</span>
     </div>
   </div>
 </header>
@@ -66,25 +66,16 @@
   <section class="screen" id="screen-consent">
     <div class="panel-card">
       <h2>Sebelum mulai</h2>
-      <p class="muted">Centang semua sebelum lanjut.</p>
-      <div class="check-list">
-        <label class="check-row">
-          <input type="checkbox" class="consent-box" />
-          <span>Saya setuju dengan <button class="inline-link" id="linkTos1">Ketentuan Layanan</button>.</span>
-        </label>
-        <label class="check-row">
-          <input type="checkbox" class="consent-box" />
-          <span>Saya setuju dengan <button class="inline-link" id="linkPrivacy1">Kebijakan Privasi</button>.</span>
-        </label>
-        <label class="check-row">
-          <input type="checkbox" class="consent-box" />
-          <span>Saya paham obrolan diawasi AI demi keamanan.</span>
-        </label>
-        <label class="check-row">
-          <input type="checkbox" class="consent-box" />
-          <span>Saya paham pelanggaran bisa berujung pemutusan atau pembatasan sementara.</span>
-        </label>
-      </div>
+      <p class="muted">Baca poin-poin berikut, lalu centang persetujuannya.</p>
+      <ul class="consent-points">
+        <li>Saya setuju dengan <button class="inline-link" id="linkTos1">Ketentuan Layanan</button> dan <button class="inline-link" id="linkPrivacy1">Kebijakan Privasi</button>.</li>
+        <li>Saya paham obrolan diawasi AI demi keamanan.</li>
+        <li>Saya paham pelanggaran bisa berujung pemutusan atau pembatasan sementara.</li>
+      </ul>
+      <label class="check-row">
+        <input type="checkbox" class="consent-box" id="consentAllBox" />
+        <span>Saya menyetujui semua poin di atas.</span>
+      </label>
       <div class="panel-actions">
         <button class="btn btn-ghost" id="btnConsentBack">Kembali</button>
         <button class="btn btn-primary" id="btnConsentContinue" disabled>Mulai Mencari</button>
@@ -194,6 +185,6 @@
 <!-- ============ TOASTS ============ -->
 <div class="toast-stack" id="toastStack"></div>
 
-<script type="module" src="/js/app.js?v=26"></script>
+<script type="module" src="/js/app.js?v=27"></script>
 </body>
 </html>

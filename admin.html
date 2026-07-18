@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="id">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
@@ -19,48 +19,68 @@
   .badge-open { background: rgba(239,68,68,.15); color: var(--danger); }
   .badge-reviewed { background: rgba(34,197,94,.15); color: var(--success); }
   .gate { max-width: 420px; margin: 120px auto; text-align: center; }
-  .gate input { width: 100%; padding: 12px; margin: 14px 0; background: #0F1729; border: var(--border-w) solid var(--border); border-radius: 10px; color: white; }
+  .gate input { width: 100%; padding: 12px; margin: 14px 0; background: var(--bg); border: var(--border-w) solid var(--border); border-radius: 10px; color: var(--text); }
 </style>
 </head>
 <body>
 <header class="topbar">
   <div class="topbar-inner">
     <div class="logo"><span>XRZ Admin</span></div>
+    <button id="btnThemeToggle" class="theme-toggle" aria-label="Ganti tema" title="Ganti tema">🌙</button>
   </div>
 </header>
 
+<script>
+  (function () {
+    const saved = localStorage.getItem("xrz-theme");
+    const prefersLight = window.matchMedia?.("(prefers-color-scheme: light)").matches;
+    const theme = saved || (prefersLight ? "light" : "dark");
+    document.documentElement.dataset.theme = theme;
+    window.addEventListener("DOMContentLoaded", () => {
+      const btn = document.getElementById("btnThemeToggle");
+      if (btn) btn.textContent = theme === "light" ? "☀️" : "🌙";
+      btn?.addEventListener("click", () => {
+        const next = document.documentElement.dataset.theme === "light" ? "dark" : "light";
+        document.documentElement.dataset.theme = next;
+        localStorage.setItem("xrz-theme", next);
+        btn.textContent = next === "light" ? "☀️" : "🌙";
+      });
+    });
+  })();
+</script>
+
 <main id="app">
   <div id="gate" class="gate">
-    <h2>Admin access</h2>
-    <p class="muted">Enter the admin password (set as <code>ADMIN_PASSWORD</code> in Vercel). It's sent as a header to <code>/api/admin-data</code> — the Firebase service account itself never touches the browser.</p>
-    <input type="password" id="pwInput" placeholder="Admin password" />
-    <button class="btn btn-primary" id="btnUnlock">Unlock Dashboard</button>
+    <h2>Akses Admin</h2>
+    <p class="muted">Masukkan password admin (di-set sebagai <code>ADMIN_PASSWORD</code> di Vercel). Password dikirim sebagai header ke <code>/api/admin-data</code> — service account Firebase sendiri tidak pernah menyentuh browser.</p>
+    <input type="password" id="pwInput" placeholder="Password admin" />
+    <button class="btn btn-primary" id="btnUnlock">Buka Dashboard</button>
     <p class="muted" id="gateError" style="color: var(--danger); display:none;"></p>
   </div>
 
   <div id="dashboard" hidden>
     <div class="admin-grid" id="statGrid"></div>
 
-    <h3 class="section-title">Open Reports</h3>
-    <table id="reportsTable"><thead><tr><th>Reason</th><th>Details</th><th>Status</th><th>Created</th></tr></thead><tbody></tbody></table>
+    <h3 class="section-title">Laporan Terbuka</h3>
+    <table id="reportsTable"><thead><tr><th>Alasan</th><th>Detail</th><th>Status</th><th>Dibuat</th></tr></thead><tbody></tbody></table>
 
-    <h3 class="section-title">Recent Violations</h3>
-    <table id="violationsTable"><thead><tr><th>Type</th><th>Severity</th><th>Evidence</th><th>Created</th></tr></thead><tbody></tbody></table>
+    <h3 class="section-title">Pelanggaran Terbaru</h3>
+    <table id="violationsTable"><thead><tr><th>Jenis</th><th>Tingkat</th><th>Bukti</th><th>Dibuat</th></tr></thead><tbody></tbody></table>
 
-    <h3 class="section-title">Ban List</h3>
-    <table id="bansTable"><thead><tr><th>Session</th><th>Reason</th><th>Until</th><th>Created</th></tr></thead><tbody></tbody></table>
+    <h3 class="section-title">Daftar Ban</h3>
+    <table id="bansTable"><thead><tr><th>Sesi</th><th>Alasan</th><th>Sampai</th><th>Dibuat</th></tr></thead><tbody></tbody></table>
 
-    <h3 class="section-title">AI Moderation Logs</h3>
-    <table id="aiLogsTable"><thead><tr><th>Provider</th><th>Verdict</th><th>Message</th><th>Created</th></tr></thead><tbody></tbody></table>
+    <h3 class="section-title">Log Moderasi AI</h3>
+    <table id="aiLogsTable"><thead><tr><th>Provider</th><th>Hasil</th><th>Pesan</th><th>Dibuat</th></tr></thead><tbody></tbody></table>
 
-    <h3 class="section-title">Strikes</h3>
-    <table id="strikesTable"><thead><tr><th>Session</th><th>Strike Count</th></tr></thead><tbody></tbody></table>
+    <h3 class="section-title">Strike</h3>
+    <table id="strikesTable"><thead><tr><th>Sesi</th><th>Jumlah Strike</th></tr></thead><tbody></tbody></table>
 
-    <h3 class="section-title">Delete a Room</h3>
-    <p class="muted">Paste a Room ID to forcibly end it. The users will see "Room telah berakhir." immediately.</p>
+    <h3 class="section-title">Hapus Room</h3>
+    <p class="muted">Tempel Room ID untuk mengakhirinya paksa. Kedua user akan langsung melihat "Room telah berakhir."</p>
     <div style="display:flex;gap:10px;max-width:480px;">
-      <input type="text" id="deleteRoomIdInput" placeholder="Room ID (e.g. Z8vKmQ4LpX9RwT2F)" style="flex:1;padding:12px;background:#0F1729;border:2.5px solid var(--border);border-radius:10px;color:white;" />
-      <button class="btn btn-danger" id="btnDeleteRoom">Delete</button>
+      <input type="text" id="deleteRoomIdInput" placeholder="Room ID (contoh: Z8vKmQ4LpX9RwT2F)" style="flex:1;padding:12px;background:var(--bg);border:2.5px solid var(--border);border-radius:10px;color:var(--text);" />
+      <button class="btn btn-danger" id="btnDeleteRoom">Hapus</button>
     </div>
   </div>
 </main>
@@ -93,12 +113,12 @@
       const body = await res.json();
       if (res.ok) {
         document.getElementById("deleteRoomIdInput").value = "";
-        alert("Room deleted.");
+        alert("Room berhasil dihapus.");
       } else {
-        alert(body.error || "Failed to delete room.");
+        alert(body.error || "Gagal menghapus room.");
       }
     } catch (err) {
-      alert("Network error deleting room.");
+      alert("Error jaringan saat menghapus room.");
     }
   });
 
@@ -116,12 +136,12 @@
       const data = await res.json();
 
       document.getElementById("statGrid").innerHTML = [
-        ["Online Users", data.onlineUsers],
-        ["Waiting Users", data.waitingUsers],
-        ["Active Rooms", data.activeRooms],
-        ["Today's Messages", data.messagesToday],
-        ["Open Reports", (data.reports || []).filter(r => r.status === "open").length],
-        ["Violations (recent)", (data.violations || []).length],
+        ["Pengguna Online", data.onlineUsers],
+        ["Pengguna Menunggu", data.waitingUsers],
+        ["Room Aktif", data.activeRooms],
+        ["Pesan Hari Ini", data.messagesToday],
+        ["Laporan Terbuka", (data.reports || []).filter(r => r.status === "open").length],
+        ["Pelanggaran (terbaru)", (data.violations || []).length],
       ].map(([label, val]) => `<div class="admin-stat"><strong>${val ?? 0}</strong><span>${label}</span></div>`).join("");
 
       document.querySelector("#reportsTable tbody").innerHTML = (data.reports || []).map(r => `
@@ -135,7 +155,7 @@
 
       document.querySelector("#bansTable tbody").innerHTML = (data.bans || []).map(b => `
         <tr><td>${esc((b.sessionId || "").slice(0,8))}</td><td>${esc(b.reason) || "—"}</td>
-        <td>${b.bannedUntil ? new Date(b.bannedUntil).toLocaleString() : "Permanent"}</td>
+        <td>${b.bannedUntil ? new Date(b.bannedUntil).toLocaleString() : "Permanen"}</td>
         <td>${b.createdAt ? new Date(b.createdAt).toLocaleString() : "—"}</td></tr>`).join("");
 
       document.querySelector("#aiLogsTable tbody").innerHTML = (data.aiLogs || []).map(l => `
@@ -147,7 +167,7 @@
 
       return true;
     } catch (err) {
-      errEl.textContent = "Network error reaching /api/admin-data";
+      errEl.textContent = "Error jaringan saat menghubungi /api/admin-data";
       errEl.style.display = "block";
       return false;
     }
